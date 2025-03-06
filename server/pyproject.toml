@@ -1,20 +1,17 @@
 [tool.poetry]
-name = "mygame"
+name = "server"
 version = "0.1.0"
-description = "A multiplayer strategy game using Flask-SocketIO"
+description = "Game server for multiplayer strategy game"
 authors = ["Your Name <you@example.com>"]
-license = "MIT"
+packages = []  # Disable packaging of the current project
 
 [tool.poetry.dependencies]
 python = "^3.9"
 Flask = "2.2.2"
 Flask-SocketIO = "5.3.2"
 eventlet = "0.32.0"
-Werkzeug = ">=2.2,<3.0"
-dnspython = "2.2.1"
-
-[tool.poetry.dev-dependencies]
-# Use poetry.group.dev.dependencies in future if needed
+Werkzeug = "2.2.2"
+dnspython = "2.2.1"  # Downgraded to 2.2.1
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
