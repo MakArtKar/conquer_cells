@@ -49,6 +49,8 @@ function renderWelcomePage(appDiv) {
         <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
         <li>If you conquer a cell, it changes to your team’s color.</li>
         <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
+        <li>All players must join the game using the same link (game key) to play multiplayer.</li>
+        <li>Each player should choose a personal color and use only that color throughout the game.</li>
       </ul>
       <p>Choose a game below (refresh for new keys):</p>
       <ul id="game-links"></ul>
