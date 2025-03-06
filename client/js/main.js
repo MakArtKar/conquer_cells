@@ -1,6 +1,6 @@
 // Constant variables for board dimensions
-const CELL_SIZE = 80;          // Cell size in pixels.
-const GAP_SIZE = 1;            // Gap between cells in pixels.
+const CELL_SIZE = 80;                   // Cell size in pixels.
+const GAP_SIZE = 1;                     // Gap between cells in pixels.
 const CELL_TOTAL = CELL_SIZE + GAP_SIZE; // Total space per cell.
 const CELL_CENTER_OFFSET = CELL_SIZE / 2;  // Center offset (40px).
 
@@ -49,8 +49,7 @@ function renderWelcomePage(appDiv) {
         <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
         <li>If you conquer a cell, it changes to your team’s color.</li>
         <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
-        <li>All players must join the game using the same link (game key) to play multiplayer.</li>
-        <li>Each player should choose a personal color and use only that color throughout the game.</li>
+        <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
       </ul>
       <p>Choose a game below (refresh for new keys):</p>
       <ul id="game-links"></ul>
@@ -70,12 +69,13 @@ function renderWelcomePage(appDiv) {
 }
 
 function renderGamePage(appDiv) {
-  // Wrap the board and overlay in a container so the overlay is positioned relative to the board.
+  // Wrap the board, overlay, and leaderboard in a container.
   const gameHTML = `
     <div id="board-container">
       <div id="game-board"></div>
       <canvas id="overlay"></canvas>
     </div>
+    <div id="leaderboard"></div>
   `;
   appDiv.innerHTML = gameHTML;
 }
@@ -83,19 +83,19 @@ function renderGamePage(appDiv) {
 function initializeGame(gameKey) {
   const socket = io("http://localhost:5001");
   const playerName = prompt("Enter your player name:") || "Anonymous";
+  const team = prompt("Enter your team (choose from red, blue, green, yellow):") || "neutral";
 
-  socket.emit('join_game', { game_key: gameKey, player_name: playerName });
-  console.log(`Client "${playerName}" joining game "${gameKey}".`);
+  socket.emit('join_game', { game_key: gameKey, player_name: playerName, team: team });
+  console.log(`Client "${playerName}" (team: ${team}) joining game "${gameKey}".`);
 
-  // Listen for start_move event – add the move animation.
   socket.on('start_move', (data) => {
     console.log(`Client "${playerName}" received start_move:`, data);
     if (data && data.move && data.duration) {
       addMoveAnimation(data.move, data.duration);
+      updateLeaderboard(); // Recompute totals including moving troops.
     }
   });
 
-  // Listen for end_move event – update board and remove the corresponding move animation.
   socket.on('end_move', (data) => {
     console.log(`Client "${playerName}" received end_move:`, data);
     if (data && data.state && data.state.board) {
@@ -107,10 +107,10 @@ function initializeGame(gameKey) {
       console.log(`Removing move animation with ID: ${data.move_id}`);
       removeMoveAnimation(data.move_id);
       console.log("Remaining move animations:", moveAnimations);
+      updateLeaderboard();
     }
   });
 
-  // Listen for general game_state updates.
   socket.on('game_state', (state) => {
     console.log(`Client "${playerName}" received game_state:`, state);
     if (state && state.board) {
@@ -152,6 +152,7 @@ function initializeGame(gameKey) {
     }
     console.log(`Client "${playerName}" rendered board at ${new Date().toLocaleTimeString()}.`);
     drawActiveMoveVectors();
+    updateLeaderboard();
   }
 
   function updateBoard(newBoard) {
@@ -174,6 +175,7 @@ function initializeGame(gameKey) {
     }
     boardState = newBoard;
     drawActiveMoveVectors();
+    updateLeaderboard();
   }
 
   function onCellClick() {
@@ -204,7 +206,7 @@ function initializeGame(gameKey) {
       socket.emit('move', moveData);
       console.log(`Client "${playerName}" sent move:`, moveData);
       boardCells[selectedCell.row][selectedCell.col].classList.remove("selected");
-      // Do NOT call addMoveAnimation here; it will be added by the server's start_move event.
+      // Do not add local animation; rely on server's start_move event.
       selectedCell = null;
     }
   }
@@ -233,7 +235,8 @@ function initializeGame(gameKey) {
       endPos: getCellCenter(toCoords),
       duration: duration,
       startTime: performance.now(),
-      team: moveData.team // Store team color.
+      team: moveData.team,  // Save team to draw vector in that color.
+      troops: moveData.troops // Save troop count for leaderboard.
     };
     moveAnimations.push(anim);
     console.log("Added move animation:", anim);
@@ -256,8 +259,7 @@ function initializeGame(gameKey) {
       ctx.beginPath();
       ctx.moveTo(anim.startPos.x, anim.startPos.y);
       ctx.lineTo(anim.endPos.x, anim.endPos.y);
-      // Use team color if available, else default to black.
-      ctx.strokeStyle = anim.team || "#000";
+      ctx.strokeStyle = anim.team || "#000"; // Use team color.
       ctx.lineWidth = 2;
       ctx.stroke();
     });
@@ -275,4 +277,46 @@ function initializeGame(gameKey) {
     const ctx = overlay.getContext('2d');
     ctx.clearRect(0, 0, overlay.width, overlay.height);
   }
+
+  // Update the leaderboard: show total troops per team and list players.
+  function updateLeaderboard() {
+    const totals = {};
+    // Sum troops for each team from board cells.
+    for (let r = 0; r < boardState.length; r++) {
+      for (let c = 0; c < boardState[r].length; c++) {
+        const cell = boardState[r][c];
+        if (cell.owner) {
+          totals[cell.owner] = (totals[cell.owner] || 0) + cell.troops;
+        }
+      }
+    }
+    // Include troops in active moves.
+    moveAnimations.forEach(anim => {
+      if (anim.team) {
+        totals[anim.team] = (totals[anim.team] || 0) + anim.troops;
+      }
+    });
+    let html = '<h2>Troops per Team</h2><table><tr><th>Team</th><th>Total Troops</th></tr>';
+    for (let team in totals) {
+      html += `<tr><td>${team}</td><td>${totals[team]}</td></tr>`;
+    }
+    html += '</table>';
+
+    // Also display player list if available.
+    if (boardState.players) {
+      html += '<h2>Players</h2><table><tr><th>Player Name</th><th>Team</th></tr>';
+      for (let sid in boardState.players) {
+        const p = boardState.players[sid];
+        html += `<tr><td>${p.name}</td><td>${p.team}</td></tr>`;
+      }
+      html += '</table>';
+    }
+    const leaderboardDiv = document.getElementById("leaderboard");
+    if (leaderboardDiv) {
+      leaderboardDiv.innerHTML = html;
+    }
+  }
+
+  // Refresh leaderboard periodically.
+  setInterval(updateLeaderboard, 1000);
 }

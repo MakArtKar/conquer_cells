@@ -1,7 +1,7 @@
 import random
-import uuid
 import threading
 import math
+import uuid
 import eventlet
 eventlet.monkey_patch()
 
@@ -63,8 +63,11 @@ def create_board_state():
 
 @app.route('/')
 def home():
-    # Return welcome page with game rules and links.
-    random_keys = random.sample(["apple", "banana", "cherry", "dragon", "eagle", "falcon", "grape", "honey", "igloo", "jungle"], 5)
+    # Return a simple welcome page with game rules and random game keys.
+    random_keys = random.sample(
+        ["apple", "banana", "cherry", "dragon", "eagle", "falcon", "grape", "honey", "igloo", "jungle"],
+        5
+    )
     html = """
     <html>
       <head>
@@ -80,6 +83,7 @@ def home():
           <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
           <li>If you conquer a cell, it changes to your team’s color.</li>
           <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
+          <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
         </ul>
         <p>Choose a game below (refresh for new keys):</p>
         <ul>
@@ -110,6 +114,7 @@ def game(game_key):
 def handle_join_game(data):
     game_key = data.get('game_key')
     player_name = data.get('player_name', 'Anonymous')
+    player_team = data.get('team', 'neutral')  # New: player's chosen team
     if game_key not in games:
         games[game_key] = {
             "board": create_board_state(),
@@ -117,18 +122,32 @@ def handle_join_game(data):
             "moves": []
         }
         print(f"Created new game: {game_key}")
-    games[game_key]["players"][request.sid] = {"name": player_name}
+    # Save player's name and team.
+    games[game_key]["players"][request.sid] = { "name": player_name, "team": player_team }
     join_room(game_key)
     emit('game_state', games[game_key], room=request.sid)
-    print(f"Player {player_name} joined game {game_key} (sid: {request.sid})")
+    print(f"Player {player_name} (team: {player_team}) joined game {game_key} (sid: {request.sid})")
 
 @socketio.on('move')
 def handle_move(data):
     game_key = data.get('game_key')
     if game_key not in games:
         return
+
     move = data
     board = games[game_key]["board"]
+
+    # Retrieve the player's information.
+    player = games[game_key]["players"].get(request.sid)
+    if not player:
+        print("Player not found for sid:", request.sid)
+        return
+
+    # Check if the player's chosen team matches the move's team.
+    if player.get("team") != move.get("team"):
+        print(f"Move rejected: player's team ({player.get('team')}) does not match move team ({move.get('team')}).")
+        return
+
     from_row = move['from']['row']
     from_col = move['from']['col']
     to_row = move['to']['row']
@@ -142,24 +161,23 @@ def handle_move(data):
     # Remove troops from the source cell immediately.
     from_cell["troops"] = 0
 
-    # Calculate Euclidean distance (in cell units) and determine duration.
+    # Calculate Euclidean distance and duration.
     dx = to_col - from_col
     dy = to_row - from_row
-    distance = math.sqrt(dx * dx + dy * dy)
+    distance = math.sqrt(dx*dx + dy*dy)
     duration = distance * 1000  # 1 second per cell
 
-    # Generate a unique move ID and attach it to the move object.
+    # Generate a unique move ID.
     move_id = str(uuid.uuid4())
     move["id"] = move_id
 
-    # Immediately emit a "start_move" event with the move data and duration.
+    # Emit a start_move event with move data and duration.
     socketio.emit('start_move', {"move": move, "duration": duration}, room=game_key)
     print(f"Emitted start_move for game {game_key} with move_id {move_id} and duration {duration} ms.")
 
-    # Spawn a new green thread to process the move after the duration.
     def process_move():
         eventlet.sleep(duration / 1000.0)
-        # Process the move based on game rules:
+        # Process the move.
         if to_cell["owner"] is None:
             to_cell["owner"] = attacking_team
             to_cell["troops"] = attacking_troops
@@ -190,11 +208,10 @@ def handle_move(data):
                 to_cell["owner"] = None
 
         games[game_key]["moves"].append(move)
-        # Emit "end_move" with the move ID and updated game state.
+        # Emit end_move event with move_id and updated game state.
         socketio.emit('end_move', {"move_id": move_id, "state": games[game_key]}, room=game_key)
         print(f"Emitted end_move for game {game_key} with move_id {move_id}.")
     eventlet.spawn(process_move)
-
 
 def generate_troops():
     """Background thread that updates troop counts and sends updates each second."""
