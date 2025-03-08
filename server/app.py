@@ -238,7 +238,7 @@ def handle_move(data):
 def generate_troops():
     """Background thread that updates troop counts and sends updates each second."""
     while True:
-        for game_key, game in games.items():
+        for game_key, game in list(games.items()):  # Use list() to avoid RuntimeError from dict changing size during iteration
             if not game.get('isPaused', False):  # Only generate troops if game is not paused
                 board = game["board"]
                 for row in board:
@@ -248,6 +248,20 @@ def generate_troops():
                 socketio.emit('game_state', game, room=game_key)
                 print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
+
+@socketio.on('finish_game')
+def handle_finish_game(data):
+    """Handle game finish requests by cleaning up the game state."""
+    game_key = data.get('game_key')
+    if game_key not in games:
+        return
+
+    # Delete the game state
+    del games[game_key]
+    print(f"Game {game_key} finished and cleaned up")
+    
+    # Notify all clients in the room that the game is finished
+    socketio.emit('game_finished', room=game_key)
 
 if __name__ == '__main__':
     troop_thread = threading.Thread(target=generate_troops)

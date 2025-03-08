@@ -78,6 +78,7 @@ function renderGamePage(appDiv) {
   const gameHTML = `
     <div class="game-controls">
       <button id="pause-button">⏸️ Pause Game</button>
+      <button id="finish-button">🏁 Finish Game</button>
     </div>
     <div id="board-container">
       <div id="game-board"></div>
@@ -90,6 +91,8 @@ function renderGamePage(appDiv) {
 
 function initializeGame(gameKey) {
   const socket = io();
+  let updateLeaderboardInterval;  // Store interval ID for cleanup
+  let animationFrameId;  // Store animation frame ID for cleanup
   
   // Create modal dialog for player input
   const modalHtml = `
@@ -132,7 +135,7 @@ function initializeGame(gameKey) {
           </label>
           <label style="display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="team" value="yellow">
-            <span style="color: #e6c700;">Yellow Team</span>
+            <span style="color: #ffffaa;">Yellow Team</span>
           </label>
         </div>
       </div>
@@ -178,7 +181,31 @@ function initializeGame(gameKey) {
     }
   });
 
+  socket.on('game_finished', () => {
+    // Clear all intervals and timeouts
+    clearInterval(updateLeaderboardInterval);
+    cancelAnimationFrame(animationFrameId);
+    
+    // Clear game state
+    moveAnimations = [];
+    boardCells = [];
+    boardState = null;
+    selectedCell = null;
+    gameState = null;
+    currentPlayer = null;
+    isPaused = false;
+    pauseStartTime = null;
+    totalPauseDuration = 0;
+
+    // Disconnect socket
+    socket.disconnect();
+
+    // Redirect to welcome page
+    window.location.href = '/';
+  });
+
   socket.on('start_move', (data) => {
+    if (!gameState) return; // Don't process events if game is finished
     if (data && data.move && data.duration) {
       addMoveAnimation(data.move, data.duration);
       updateLeaderboard();
@@ -186,6 +213,7 @@ function initializeGame(gameKey) {
   });
 
   socket.on('end_move', (data) => {
+    if (!gameState) return; // Don't process events if game is finished
     if (data && data.state) {
       gameState = data.state;
       boardState = data.state.board;
@@ -240,8 +268,61 @@ function initializeGame(gameKey) {
       socket.emit('toggle_pause', { game_key: gameKey });
     });
 
-    // Start periodic leaderboard updates
-    setInterval(updateLeaderboard, 1000);
+    // Add finish button handler
+    const finishButton = document.getElementById('finish-button');
+    finishButton.addEventListener('click', () => {
+      // Disable the button and all game interactions immediately
+      finishButton.disabled = true;
+      finishButton.textContent = "Finishing...";
+      
+      // Disable the pause button too
+      const pauseButton = document.getElementById('pause-button');
+      pauseButton.disabled = true;
+
+      // Remove click handlers from all cells
+      if (boardCells) {
+        boardCells.forEach(row => {
+          row.forEach(cell => {
+            cell.removeEventListener('click', onCellClick);
+            cell.style.cursor = 'default';
+          });
+        });
+      }
+
+      // Notify server to clean up game state and stop game loops
+      socket.emit('finish_game', { 
+        game_key: gameKey,
+        player_name: currentPlayer ? currentPlayer.name : 'Anonymous',
+        team: currentPlayer ? currentPlayer.team : 'neutral'
+      });
+
+      // Set a timeout to force cleanup if server doesn't respond
+      setTimeout(() => {
+        // If we haven't already cleaned up (redirected), do it now
+        if (window.location.pathname !== '/') {
+          console.log('Server did not acknowledge game finish, cleaning up anyway');
+          clearInterval(updateLeaderboardInterval);
+          cancelAnimationFrame(animationFrameId);
+          
+          // Clear game state to stop processing updates
+          moveAnimations = [];
+          boardCells = [];
+          boardState = null;
+          selectedCell = null;
+          gameState = null;
+          currentPlayer = null;
+          isPaused = false;
+          pauseStartTime = null;
+          totalPauseDuration = 0;
+
+          socket.disconnect();
+          window.location.href = '/';
+        }
+      }, 3000); // Wait 3 seconds for server response
+    });
+
+    // Start periodic leaderboard updates and store interval ID
+    updateLeaderboardInterval = setInterval(updateLeaderboard, 1000);
   });
 
   function renderBoard(board) {
@@ -272,7 +353,7 @@ function initializeGame(gameKey) {
       }
       boardCells.push(rowCells);
     }
-    console.log(`Client "${validatedName}" rendered board at ${new Date().toLocaleTimeString()}.`);
+    console.log(`Client rendered board at ${new Date().toLocaleTimeString()}.`);
     drawActiveMoveVectors();
     updateLeaderboard();
   }
@@ -428,7 +509,8 @@ function initializeGame(gameKey) {
       }
     });
     
-    requestAnimationFrame(drawActiveMoveVectors);
+    // Store the animation frame ID
+    animationFrameId = requestAnimationFrame(drawActiveMoveVectors);
   }
 
   function updateOverlay() {
