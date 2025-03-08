@@ -107,10 +107,12 @@ body {
 /* Spawn styling */
 .spawn {
   border: 2px solid black;
+  filter: brightness(0.85);
 }
 
 .inactive-spawn {
   background-color: #555;
+  filter: none;
 }
 
 /* Overlay canvas positioned relative to board-container */

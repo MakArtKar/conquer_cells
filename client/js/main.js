@@ -35,12 +35,12 @@ function generateRandomKeys(n) {
     "falcon", "grape", "honey", "igloo", "jungle",
     "koala", "lemon", "mango", "nectar", "orange"
   ];
-  const keys = [];
-  for (let i = 0; i < n; i++) {
-    const randomIndex = Math.floor(Math.random() * sampleWords.length);
-    keys.push(sampleWords[randomIndex]);
-  }
-  return keys;
+  
+  // Shuffle the array
+  const shuffled = [...sampleWords].sort(() => Math.random() - 0.5);
+  
+  // Take first n elements (or all if n > array length)
+  return shuffled.slice(0, Math.min(n, sampleWords.length));
 }
 
 function renderWelcomePage(appDiv) {
@@ -132,7 +132,7 @@ function initializeGame(gameKey) {
           </label>
           <label style="display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="team" value="yellow">
-            <span style="color: #ffffaa;">Yellow Team</span>
+            <span style="color: #e6c700;">Yellow Team</span>
           </label>
         </div>
       </div>
