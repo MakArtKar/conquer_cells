@@ -9,6 +9,8 @@ let moveAnimations = [];  // Array to store active move animations
 let boardCells = [];
 let boardState = null;
 let selectedCell = null;
+let gameState = null;  // Store complete game state
+let currentPlayer = null;  // Store current player info
 
 document.addEventListener('DOMContentLoaded', () => {
   const appDiv = document.getElementById("app");
@@ -87,6 +89,10 @@ function initializeGame(gameKey) {
   const socket = io();
   const playerName = prompt("Enter your player name:") || "Anonymous";
   const team = prompt("Enter your team (choose from red, blue, green, yellow):") || "neutral";
+  
+  // Store current player info
+  currentPlayer = { name: playerName, team: team };
+  
   let isPaused = false;
 
   socket.emit('join_game', { game_key: gameKey, player_name: playerName, team: team });
@@ -114,7 +120,8 @@ function initializeGame(gameKey) {
 
   socket.on('end_move', (data) => {
     console.log(`Client "${playerName}" received end_move:`, data);
-    if (data && data.state && data.state.board) {
+    if (data && data.state) {
+      gameState = data.state;  // Store complete game state
       boardState = data.state.board;
       updateBoard(boardState);
     }
@@ -129,12 +136,16 @@ function initializeGame(gameKey) {
 
   socket.on('game_state', (state) => {
     console.log(`Client "${playerName}" received game_state:`, state);
-    if (state && state.board) {
-      boardState = state.board;
-      if (boardCells.length === 0) {
-        renderBoard(boardState);
+    if (state) {
+      gameState = state;  // Store complete game state
+      if (state.board) {
+        boardState = state.board;
+        if (boardCells.length === 0) {
+          renderBoard(boardState);
+        }
+        updateBoard(boardState);
+        updateLeaderboard();
       }
-      updateBoard(boardState);
     }
   });
 
@@ -318,12 +329,14 @@ function initializeGame(gameKey) {
 
   // Update the leaderboard: show total troops per team and list players.
   function updateLeaderboard() {
+    if (!gameState) return;  // Don't update if we don't have game state
+
     const leaderboard = document.getElementById('leaderboard');
     const teamTotals = {
-      red: { troops: 0, spawns: 0, cells: 0 },
-      blue: { troops: 0, spawns: 0, cells: 0 },
-      green: { troops: 0, spawns: 0, cells: 0 },
-      yellow: { troops: 0, spawns: 0, cells: 0 }
+      red: { troops: 0, spawns: 0, cells: 0, players: [] },
+      blue: { troops: 0, spawns: 0, cells: 0, players: [] },
+      green: { troops: 0, spawns: 0, cells: 0, players: [] },
+      yellow: { troops: 0, spawns: 0, cells: 0, players: [] }
     };
     
     // Count board state
@@ -346,30 +359,40 @@ function initializeGame(gameKey) {
         teamTotals[anim.team].troops += anim.troops;
       }
     });
+
+    // Add players to their teams
+    if (gameState.players) {
+      Object.values(gameState.players).forEach(player => {
+        if (teamTotals[player.team]) {
+          teamTotals[player.team].players.push(player.name);
+        }
+      });
+    }
     
     // Create leaderboard HTML
     const html = `
       <table>
-        <thead>
-          <tr>
-            <th>Team</th>
-            <th>Troops</th>
-            <th>Spawns</th>
-            <th>Cells</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${Object.entries(teamTotals)
-            .sort(([,a], [,b]) => b.troops - a.troops)
-            .map(([team, stats]) => `
-              <tr class="${team}-row">
-                <td>${team.charAt(0).toUpperCase() + team.slice(1)}</td>
-                <td>${stats.troops}</td>
-                <td>${stats.spawns}</td>
-                <td>${stats.cells}</td>
+        <tr>
+          <td class="team-name">Team</td>
+          <td class="player-names">Players</td>
+          <td class="stat-value">Troops</td>
+          <td class="stat-value">Spawns</td>
+          <td class="stat-value">Cells</td>
+        </tr>
+        ${Object.entries(teamTotals)
+          .sort(([,a], [,b]) => b.troops - a.troops)
+          .map(([team, stats]) => {
+            const isCurrentTeam = team === currentPlayer.team;
+            return `
+              <tr class="${team}-row${isCurrentTeam ? ' current-player-team' : ''}">
+                <td class="team-name">${team.charAt(0).toUpperCase() + team.slice(1)}</td>
+                <td class="player-names">${stats.players.length > 0 ? stats.players.join(', ') : '-'}</td>
+                <td class="stat-value">${stats.troops}</td>
+                <td class="stat-value">${stats.spawns}</td>
+                <td class="stat-value">${stats.cells}</td>
               </tr>
-            `).join('')}
-        </tbody>
+            `;
+          }).join('')}
       </table>
     `;
     

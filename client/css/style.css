@@ -154,7 +154,7 @@ body {
 
 /* Update leaderboard styles */
 #leaderboard {
-  max-width: 500px;
+  max-width: 800px;
   margin: 20px auto;
   font-size: 1.2em;
   background: white;
@@ -166,39 +166,80 @@ body {
 #leaderboard table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
-#leaderboard th, #leaderboard td {
+#leaderboard td {
   padding: 12px;
-  text-align: center;
   border-bottom: 1px solid #eee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
-#leaderboard th {
+/* First row (header) styling */
+#leaderboard tr:first-child td {
   background-color: #f8f9fa;
   font-weight: bold;
   color: #333;
 }
 
-#leaderboard tr:last-child td {
-  border-bottom: none;
+/* Column widths and alignments */
+.team-name { 
+  width: 15%; 
+  text-align: left;
+}
+
+.player-names { 
+  width: 35%; 
+  text-align: left;
+  padding-left: 20px;
+}
+
+.stat-value { 
+  width: 15%; 
+  text-align: center;
 }
 
 /* Team row colors in leaderboard */
-#leaderboard .red-row {
+.red-row {
   background-color: rgba(255, 0, 0, 0.1);
 }
 
-#leaderboard .blue-row {
+.blue-row {
   background-color: rgba(0, 0, 255, 0.1);
 }
 
-#leaderboard .green-row {
+.green-row {
   background-color: rgba(0, 255, 0, 0.1);
 }
 
-#leaderboard .yellow-row {
+.yellow-row {
   background-color: rgba(255, 255, 0, 0.1);
+}
+
+/* Current player's team highlighting */
+tr.current-player-team {
+  position: relative;
+  font-weight: bold;
+}
+
+/* Specific colors for current player's team */
+tr.red-row.current-player-team {
+  background-color: rgba(255, 0, 0, 0.2);
+}
+
+tr.blue-row.current-player-team {
+  background-color: rgba(0, 0, 255, 0.2);
+}
+
+tr.green-row.current-player-team {
+  background-color: rgba(0, 255, 0, 0.2);
+}
+
+tr.yellow-row.current-player-team {
+  background-color: rgba(255, 255, 0, 0.2);
 }
 
 /* Cell hover effect */
