@@ -122,21 +122,98 @@ body {
   z-index: 10;
 }
 
-/* Leaderboard styling */
+/* Game controls */
+.game-controls {
+  max-width: calc(16 * 80px + 15 * 1px);
+  margin: 20px auto;
+  text-align: center;
+}
+
+#pause-button {
+  font-size: 1.2em;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  background-color: #4CAF50;
+  color: white;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+#pause-button:hover {
+  background-color: #45a049;
+}
+
+#pause-button.paused {
+  background-color: #f44336;
+}
+
+#pause-button.paused:hover {
+  background-color: #da190b;
+}
+
+/* Update leaderboard styles */
 #leaderboard {
   max-width: 500px;
   margin: 20px auto;
   font-size: 1.2em;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  overflow: hidden;
 }
+
 #leaderboard table {
   width: 100%;
   border-collapse: collapse;
 }
+
 #leaderboard th, #leaderboard td {
-  border: 1px solid #ccc;
-  padding: 8px;
+  padding: 12px;
   text-align: center;
+  border-bottom: 1px solid #eee;
 }
+
 #leaderboard th {
-  background-color: #eee;
+  background-color: #f8f9fa;
+  font-weight: bold;
+  color: #333;
+}
+
+#leaderboard tr:last-child td {
+  border-bottom: none;
+}
+
+/* Team row colors in leaderboard */
+#leaderboard .red-row {
+  background-color: rgba(255, 0, 0, 0.1);
+}
+
+#leaderboard .blue-row {
+  background-color: rgba(0, 0, 255, 0.1);
+}
+
+#leaderboard .green-row {
+  background-color: rgba(0, 255, 0, 0.1);
+}
+
+#leaderboard .yellow-row {
+  background-color: rgba(255, 255, 0, 0.1);
+}
+
+/* Cell hover effect */
+.cell:hover {
+  filter: brightness(0.9);
+}
+
+/* Selected cell animation */
+.cell.selected {
+  outline: 3px solid #ff0;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { outline-color: rgba(255, 255, 0, 1); }
+  50% { outline-color: rgba(255, 255, 0, 0.5); }
+  100% { outline-color: rgba(255, 255, 0, 1); }
 }

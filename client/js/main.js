@@ -47,7 +47,7 @@ function renderWelcomePage(appDiv) {
         <li>The board is 16x16 with four corner spawns.</li>
         <li>Extra (grey) spawns generate troops only after they are conquered.</li>
         <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
-        <li>If you conquer a cell, it changes to your team’s color.</li>
+        <li>If you conquer a cell, it changes to your team's color.</li>
         <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
         <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
       </ul>
@@ -71,6 +71,9 @@ function renderWelcomePage(appDiv) {
 function renderGamePage(appDiv) {
   // Wrap the board, overlay, and leaderboard in a container.
   const gameHTML = `
+    <div class="game-controls">
+      <button id="pause-button">⏸️ Pause Game</button>
+    </div>
     <div id="board-container">
       <div id="game-board"></div>
       <canvas id="overlay"></canvas>
@@ -84,9 +87,22 @@ function initializeGame(gameKey) {
   const socket = io();
   const playerName = prompt("Enter your player name:") || "Anonymous";
   const team = prompt("Enter your team (choose from red, blue, green, yellow):") || "neutral";
+  let isPaused = false;
 
   socket.emit('join_game', { game_key: gameKey, player_name: playerName, team: team });
   console.log(`Client "${playerName}" (team: ${team}) joining game "${gameKey}".`);
+
+  // Add pause button handler
+  const pauseButton = document.getElementById('pause-button');
+  pauseButton.addEventListener('click', () => {
+    socket.emit('toggle_pause', { game_key: gameKey });
+  });
+
+  socket.on('pause_state', (data) => {
+    isPaused = data.isPaused;
+    pauseButton.textContent = isPaused ? "▶️ Resume Game" : "⏸️ Pause Game";
+    pauseButton.classList.toggle('paused', isPaused);
+  });
 
   socket.on('start_move', (data) => {
     console.log(`Client "${playerName}" received start_move:`, data);
@@ -253,24 +269,46 @@ function initializeGame(gameKey) {
     const container = document.getElementById('board-container');
     overlay.width = container.offsetWidth;
     overlay.height = container.offsetHeight;
+    
     const ctx = overlay.getContext('2d');
     ctx.clearRect(0, 0, overlay.width, overlay.height);
+    
+    const currentTime = performance.now();
+    
     moveAnimations.forEach(anim => {
-      ctx.beginPath();
-      ctx.moveTo(anim.startPos.x, anim.startPos.y);
-      ctx.lineTo(anim.endPos.x, anim.endPos.y);
-      ctx.strokeStyle = anim.team || "#000"; // Use team color.
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const progress = (currentTime - anim.startTime) / anim.duration;
+      if (progress <= 1) {
+        // Calculate current position
+        const x = anim.startPos.x + (anim.endPos.x - anim.startPos.x) * progress;
+        const y = anim.startPos.y + (anim.endPos.y - anim.startPos.y) * progress;
+        
+        // Draw line from start to end
+        ctx.beginPath();
+        ctx.moveTo(anim.startPos.x, anim.startPos.y);
+        ctx.lineTo(anim.endPos.x, anim.endPos.y);
+        ctx.strokeStyle = anim.team;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Draw moving troops circle
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = anim.team;
+        ctx.fill();
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = '12px Arial';
+        ctx.fillText(anim.troops.toString(), x, y);
+      }
     });
+    
+    requestAnimationFrame(drawActiveMoveVectors);
   }
 
-  // Global overlay update loop.
   function updateOverlay() {
     drawActiveMoveVectors();
-    requestAnimationFrame(updateOverlay);
   }
-  requestAnimationFrame(updateOverlay);
 
   function clearOverlay() {
     const overlay = document.getElementById('overlay');
@@ -280,43 +318,62 @@ function initializeGame(gameKey) {
 
   // Update the leaderboard: show total troops per team and list players.
   function updateLeaderboard() {
-    if (!boardState) return; // If boardState is null, do nothing.
+    const leaderboard = document.getElementById('leaderboard');
+    const teamTotals = {
+      red: { troops: 0, spawns: 0, cells: 0 },
+      blue: { troops: 0, spawns: 0, cells: 0 },
+      green: { troops: 0, spawns: 0, cells: 0 },
+      yellow: { troops: 0, spawns: 0, cells: 0 }
+    };
     
-    const totals = {};
-    // Sum troops for each team from board cells.
+    // Count board state
     for (let r = 0; r < boardState.length; r++) {
       for (let c = 0; c < boardState[r].length; c++) {
         const cell = boardState[r][c];
-        if (cell.owner) {
-          totals[cell.owner] = (totals[cell.owner] || 0) + cell.troops;
+        if (cell.owner && teamTotals[cell.owner]) {
+          teamTotals[cell.owner].troops += cell.troops;
+          teamTotals[cell.owner].cells++;
+          if (cell.isSpawn && cell.spawnActive) {
+            teamTotals[cell.owner].spawns++;
+          }
         }
       }
     }
-    // Include troops in active moves.
+    
+    // Add troops from active moves
     moveAnimations.forEach(anim => {
-      if (anim.team) {
-        totals[anim.team] = (totals[anim.team] || 0) + anim.troops;
+      if (teamTotals[anim.team]) {
+        teamTotals[anim.team].troops += anim.troops;
       }
     });
-    let html = '<h2>Troops per Team</h2><table><tr><th>Team</th><th>Total Troops</th></tr>';
-    for (let team in totals) {
-      html += `<tr><td>${team}</td><td>${totals[team]}</td></tr>`;
-    }
-    html += '</table>';
-
-    // Also display player list if available.
-    if (boardState.players) {
-      html += '<h2>Players</h2><table><tr><th>Player Name</th><th>Team</th></tr>';
-      for (let sid in boardState.players) {
-        const p = boardState.players[sid];
-        html += `<tr><td>${p.name}</td><td>${p.team}</td></tr>`;
-      }
-      html += '</table>';
-    }
-    const leaderboardDiv = document.getElementById("leaderboard");
-    if (leaderboardDiv) {
-      leaderboardDiv.innerHTML = html;
-    }
+    
+    // Create leaderboard HTML
+    const html = `
+      <table>
+        <thead>
+          <tr>
+            <th>Team</th>
+            <th>Troops</th>
+            <th>Spawns</th>
+            <th>Cells</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Object.entries(teamTotals)
+            .sort(([,a], [,b]) => b.troops - a.troops)
+            .map(([team, stats]) => `
+              <tr class="${team}-row">
+                <td>${team.charAt(0).toUpperCase() + team.slice(1)}</td>
+                <td>${stats.troops}</td>
+                <td>${stats.spawns}</td>
+                <td>${stats.cells}</td>
+              </tr>
+            `).join('')}
+        </tbody>
+      </table>
+    `;
+    
+    leaderboard.innerHTML = html;
   }
 
   // Refresh leaderboard periodically.

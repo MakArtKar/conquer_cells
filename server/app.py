@@ -81,7 +81,7 @@ def home():
           <li>The board is 16x16 with four corner spawns.</li>
           <li>Extra (grey) spawns generate troops only after they are conquered.</li>
           <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
-          <li>If you conquer a cell, it changes to your team’s color.</li>
+          <li>If you conquer a cell, it changes to your team's color.</li>
           <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
           <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
         </ul>
@@ -128,17 +128,34 @@ def handle_join_game(data):
     emit('game_state', games[game_key], room=request.sid)
     print(f"Player {player_name} (team: {player_team}) joined game {game_key} (sid: {request.sid})")
 
+@socketio.on('toggle_pause')
+def handle_toggle_pause(data):
+    """Handle pause/unpause requests."""
+    game_key = data.get('game_key')
+    if game_key not in games:
+        return
+    
+    game = games[game_key]
+    game['isPaused'] = not game.get('isPaused', False)
+    socketio.emit('pause_state', {'isPaused': game['isPaused']}, room=game_key)
+    print(f"Game {game_key} {'paused' if game['isPaused'] else 'resumed'}")
+
 @socketio.on('move')
 def handle_move(data):
+    """Handle move requests."""
     game_key = data.get('game_key')
     if game_key not in games:
         return
 
+    game = games[game_key]
+    if game.get('isPaused', False):  # Don't process moves if game is paused
+        return
+
     move = data
-    board = games[game_key]["board"]
+    board = game["board"]
 
     # Retrieve the player's information.
-    player = games[game_key]["players"].get(request.sid)
+    player = game["players"].get(request.sid)
     if not player:
         print("Player not found for sid:", request.sid)
         return
@@ -177,6 +194,11 @@ def handle_move(data):
 
     def process_move():
         eventlet.sleep(duration / 1000.0)
+        # Don't process the move if the game is paused
+        if games[game_key].get('isPaused', False):
+            eventlet.sleep(0.1)  # Sleep briefly and check again
+            return process_move()  # Recursively check until unpaused
+            
         # Process the move.
         if to_cell["owner"] is None:
             to_cell["owner"] = attacking_team
@@ -207,9 +229,9 @@ def handle_move(data):
                 to_cell["troops"] = 0
                 to_cell["owner"] = None
 
-        games[game_key]["moves"].append(move)
+        game["moves"].append(move)
         # Emit end_move event with move_id and updated game state.
-        socketio.emit('end_move', {"move_id": move_id, "state": games[game_key]}, room=game_key)
+        socketio.emit('end_move', {"move_id": move_id, "state": game}, room=game_key)
         print(f"Emitted end_move for game {game_key} with move_id {move_id}.")
     eventlet.spawn(process_move)
 
@@ -217,13 +239,14 @@ def generate_troops():
     """Background thread that updates troop counts and sends updates each second."""
     while True:
         for game_key, game in games.items():
-            board = game["board"]
-            for row in board:
-                for cell in row:
-                    if cell["isSpawn"] and cell["spawnActive"]:
-                        cell["troops"] += 1
-            socketio.emit('game_state', game, room=game_key)
-            print(f"Updated troops for game {game_key}")
+            if not game.get('isPaused', False):  # Only generate troops if game is not paused
+                board = game["board"]
+                for row in board:
+                    for cell in row:
+                        if cell["isSpawn"] and cell["spawnActive"]:
+                            cell["troops"] += 1
+                socketio.emit('game_state', game, room=game_key)
+                print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
 
 if __name__ == '__main__':
