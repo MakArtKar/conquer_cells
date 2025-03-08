@@ -11,6 +11,9 @@ let boardState = null;
 let selectedCell = null;
 let gameState = null;  // Store complete game state
 let currentPlayer = null;  // Store current player info
+let isPaused = false;  // Track pause state
+let pauseStartTime = null;  // Track when pause started
+let totalPauseDuration = 0;  // Track cumulative pause duration
 
 document.addEventListener('DOMContentLoaded', () => {
   const appDiv = document.getElementById("app");
@@ -93,8 +96,6 @@ function initializeGame(gameKey) {
   // Store current player info
   currentPlayer = { name: playerName, team: team };
   
-  let isPaused = false;
-
   socket.emit('join_game', { game_key: gameKey, player_name: playerName, team: team });
   console.log(`Client "${playerName}" (team: ${team}) joining game "${gameKey}".`);
 
@@ -105,9 +106,19 @@ function initializeGame(gameKey) {
   });
 
   socket.on('pause_state', (data) => {
+    const wasPaused = isPaused;
     isPaused = data.isPaused;
     pauseButton.textContent = isPaused ? "▶️ Resume Game" : "⏸️ Pause Game";
     pauseButton.classList.toggle('paused', isPaused);
+    
+    if (isPaused) {
+      // Store the time when pause started
+      pauseStartTime = performance.now();
+    } else if (wasPaused && pauseStartTime) {
+      // Add to total pause duration when unpausing
+      totalPauseDuration += performance.now() - pauseStartTime;
+      pauseStartTime = null;
+    }
   });
 
   socket.on('start_move', (data) => {
@@ -261,9 +272,9 @@ function initializeGame(gameKey) {
       startPos: getCellCenter(fromCoords),
       endPos: getCellCenter(toCoords),
       duration: duration,
-      startTime: performance.now(),
-      team: moveData.team,  // Save team to draw vector in that color.
-      troops: moveData.troops // Save troop count for leaderboard.
+      startTime: performance.now() - totalPauseDuration, // Adjust start time by total pause duration
+      team: moveData.team,
+      troops: moveData.troops
     };
     moveAnimations.push(anim);
     console.log("Added move animation:", anim);
@@ -287,7 +298,15 @@ function initializeGame(gameKey) {
     const currentTime = performance.now();
     
     moveAnimations.forEach(anim => {
-      const progress = (currentTime - anim.startTime) / anim.duration;
+      // Calculate progress considering total pause duration and current pause if any
+      let effectivePauseDuration = totalPauseDuration;
+      if (isPaused && pauseStartTime) {
+        effectivePauseDuration += currentTime - pauseStartTime;
+      }
+      
+      const adjustedCurrentTime = currentTime - effectivePauseDuration;
+      const progress = (adjustedCurrentTime - anim.startTime) / anim.duration;
+      
       if (progress <= 1) {
         // Calculate current position
         const x = anim.startPos.x + (anim.endPos.x - anim.startPos.x) * progress;
