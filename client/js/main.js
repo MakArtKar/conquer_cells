@@ -90,65 +90,117 @@ function renderGamePage(appDiv) {
 
 function initializeGame(gameKey) {
   const socket = io();
-  const playerName = prompt("Enter your player name:") || "Anonymous";
-  const team = prompt("Enter your team (choose from red, blue, green, yellow):") || "neutral";
   
-  // Store current player info
-  currentPlayer = { name: playerName, team: team };
-  
-  socket.emit('join_game', { game_key: gameKey, player_name: playerName, team: team });
-  console.log(`Client "${playerName}" (team: ${team}) joining game "${gameKey}".`);
+  // Create modal dialog for player input
+  const modalHtml = `
+    <div id="player-input-modal" style="
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      z-index: 1000;
+    ">
+      <h2 style="margin-top: 0;">Join Game</h2>
+      <div style="margin-bottom: 15px;">
+        <label>Your Name:</label>
+        <input type="text" id="player-name" style="
+          width: 100%;
+          padding: 5px;
+          margin-top: 5px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        ">
+      </div>
+      <div style="margin-bottom: 15px;">
+        <label>Select Team:</label>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 5px;">
+          <label style="display: flex; align-items: center; gap: 5px;">
+            <input type="radio" name="team" value="red" required>
+            <span style="color: #ffaaaa;">Red Team</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 5px;">
+            <input type="radio" name="team" value="blue">
+            <span style="color: #aaaaff;">Blue Team</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 5px;">
+            <input type="radio" name="team" value="green">
+            <span style="color: #aaffaa;">Green Team</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 5px;">
+            <input type="radio" name="team" value="yellow">
+            <span style="color: #ffffaa;">Yellow Team</span>
+          </label>
+        </div>
+      </div>
+      <button id="join-game-btn" style="
+        width: 100%;
+        padding: 10px;
+        background: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      ">Join Game</button>
+    </div>
+    <div style="
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 999;
+    "></div>
+  `;
 
-  // Add pause button handler
-  const pauseButton = document.getElementById('pause-button');
-  pauseButton.addEventListener('click', () => {
-    socket.emit('toggle_pause', { game_key: gameKey });
-  });
+  // Add modal to page
+  const modalContainer = document.createElement('div');
+  modalContainer.innerHTML = modalHtml;
+  document.body.appendChild(modalContainer);
 
+  // Set up all socket event handlers first
   socket.on('pause_state', (data) => {
     const wasPaused = isPaused;
     isPaused = data.isPaused;
+    const pauseButton = document.getElementById('pause-button');
     pauseButton.textContent = isPaused ? "▶️ Resume Game" : "⏸️ Pause Game";
     pauseButton.classList.toggle('paused', isPaused);
     
     if (isPaused) {
-      // Store the time when pause started
       pauseStartTime = performance.now();
     } else if (wasPaused && pauseStartTime) {
-      // Add to total pause duration when unpausing
       totalPauseDuration += performance.now() - pauseStartTime;
       pauseStartTime = null;
     }
   });
 
   socket.on('start_move', (data) => {
-    console.log(`Client "${playerName}" received start_move:`, data);
     if (data && data.move && data.duration) {
       addMoveAnimation(data.move, data.duration);
-      updateLeaderboard(); // Recompute totals including moving troops.
+      updateLeaderboard();
     }
   });
 
   socket.on('end_move', (data) => {
-    console.log(`Client "${playerName}" received end_move:`, data);
     if (data && data.state) {
-      gameState = data.state;  // Store complete game state
+      gameState = data.state;
       boardState = data.state.board;
       updateBoard(boardState);
     }
     clearOverlay();
     if (data.move_id) {
-      console.log(`Removing move animation with ID: ${data.move_id}`);
       removeMoveAnimation(data.move_id);
-      console.log("Remaining move animations:", moveAnimations);
       updateLeaderboard();
     }
   });
 
   socket.on('game_state', (state) => {
-    console.log(`Client "${playerName}" received game_state:`, state);
     if (state) {
-      gameState = state;  // Store complete game state
+      gameState = state;
       if (state.board) {
         boardState = state.board;
         if (boardCells.length === 0) {
@@ -158,6 +210,38 @@ function initializeGame(gameKey) {
         updateLeaderboard();
       }
     }
+  });
+
+  // Handle form submission
+  const joinButton = document.getElementById('join-game-btn');
+  joinButton.addEventListener('click', () => {
+    const nameInput = document.getElementById('player-name');
+    const teamInput = document.querySelector('input[name="team"]:checked');
+    
+    const validatedName = nameInput.value.trim() || 'Anonymous';
+    const validatedTeam = teamInput ? teamInput.value : 'neutral';
+
+    // Remove modal
+    modalContainer.remove();
+
+    // Store current player info
+    currentPlayer = { name: validatedName, team: validatedTeam };
+    
+    // Connect to game
+    socket.emit('join_game', { 
+      game_key: gameKey, 
+      player_name: validatedName, 
+      team: validatedTeam 
+    });
+
+    // Add pause button handler
+    const pauseButton = document.getElementById('pause-button');
+    pauseButton.addEventListener('click', () => {
+      socket.emit('toggle_pause', { game_key: gameKey });
+    });
+
+    // Start periodic leaderboard updates
+    setInterval(updateLeaderboard, 1000);
   });
 
   function renderBoard(board) {
@@ -188,7 +272,7 @@ function initializeGame(gameKey) {
       }
       boardCells.push(rowCells);
     }
-    console.log(`Client "${playerName}" rendered board at ${new Date().toLocaleTimeString()}.`);
+    console.log(`Client "${validatedName}" rendered board at ${new Date().toLocaleTimeString()}.`);
     drawActiveMoveVectors();
     updateLeaderboard();
   }
@@ -221,30 +305,41 @@ function initializeGame(gameKey) {
     const c = parseInt(this.dataset.col);
     const cellData = boardState[r][c];
 
+    // If no cell is selected
     if (!selectedCell) {
-      if (cellData.troops > 0) {
+      // Can only select cells that belong to player's team and have troops
+      if (cellData.owner === currentPlayer.team && cellData.troops > 0) {
         selectedCell = { row: r, col: c, element: this };
         this.classList.add("selected");
-        console.log(`Client "${playerName}" selected cell at (${r},${c}).`);
+        console.log(`Selected cell at (${r},${c}) with ${cellData.troops} troops`);
       }
-    } else {
+    } 
+    // If a cell is already selected
+    else {
+      // If clicking the same cell, deselect it
       if (selectedCell.row === r && selectedCell.col === c) {
         this.classList.remove("selected");
         selectedCell = null;
-        console.log(`Client "${playerName}" deselected cell at (${r},${c}).`);
+        console.log(`Deselected cell at (${r},${c})`);
         return;
       }
-      const moveData = {
-        game_key: gameKey,
-        from: { row: selectedCell.row, col: selectedCell.col },
-        to: { row: r, col: c },
-        troops: boardState[selectedCell.row][selectedCell.col].troops,
-        team: boardState[selectedCell.row][selectedCell.col].owner || "neutral"
-      };
-      socket.emit('move', moveData);
-      console.log(`Client "${playerName}" sent move:`, moveData);
-      boardCells[selectedCell.row][selectedCell.col].classList.remove("selected");
-      // Do not add local animation; rely on server's start_move event.
+
+      // Only allow moves from owned cells
+      const fromCell = boardState[selectedCell.row][selectedCell.col];
+      if (fromCell.owner === currentPlayer.team) {
+        const moveData = {
+          game_key: gameKey,
+          from: { row: selectedCell.row, col: selectedCell.col },
+          to: { row: r, col: c },
+          troops: fromCell.troops,
+          team: currentPlayer.team
+        };
+        socket.emit('move', moveData);
+        console.log(`Moving ${fromCell.troops} troops from (${selectedCell.row},${selectedCell.col}) to (${r},${c})`);
+      }
+
+      // Clear selection
+      selectedCell.element.classList.remove("selected");
       selectedCell = null;
     }
   }
@@ -417,7 +512,4 @@ function initializeGame(gameKey) {
     
     leaderboard.innerHTML = html;
   }
-
-  // Refresh leaderboard periodically.
-  setInterval(updateLeaderboard, 1000);
 }
