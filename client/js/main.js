@@ -81,7 +81,7 @@ function renderGamePage(appDiv) {
 }
 
 function initializeGame(gameKey) {
-  const socket = io("http://localhost:5001");
+  const socket = io();
   const playerName = prompt("Enter your player name:") || "Anonymous";
   const team = prompt("Enter your team (choose from red, blue, green, yellow):") || "neutral";
 
@@ -280,6 +280,8 @@ function initializeGame(gameKey) {
 
   // Update the leaderboard: show total troops per team and list players.
   function updateLeaderboard() {
+    if (!boardState) return; // If boardState is null, do nothing.
+    
     const totals = {};
     // Sum troops for each team from board cells.
     for (let r = 0; r < boardState.length; r++) {

@@ -1,10 +1,29 @@
-version: "3.8"
+version: '3.8'
 services:
   server:
     build: ./server
     ports:
       - "5001:5001"
+    networks:
+      - app-network
+
   client:
     build: ./client
     ports:
-      - "5002:80"
+      - "5002:80"  # Internal client container port; Nginx will proxy to it.
+    networks:
+      - app-network
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "8080:80"  # Host port 8080 maps to container port 80.
+    depends_on:
+      - client
+      - server
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
