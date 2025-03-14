@@ -335,6 +335,7 @@ def handle_move(data):
             else:
                 to_cell["troops"] = 0
                 to_cell["owner"] = None
+                to_cell["spawnActive"] = False
 
         game["moves"].append(move)
         # Emit end_move event with move_id and updated game state.
