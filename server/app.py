@@ -31,6 +31,7 @@ def create_board_state():
                 "isSpawn": False,
                 "spawnActive": False,
                 "isCorner": False,
+                "originalTeam": None,
             }
             row.append(cell)
         board.append(row)
@@ -47,7 +48,7 @@ def create_board_state():
         board[r][c]["isSpawn"] = True
         board[r][c]["spawnActive"] = True
         board[r][c]["isCorner"] = True
-
+        board[r][c]["originalTeam"] = team
     # Randomly select 15% of non-corner cells as extra spawns (initially inactive).
     non_corner_positions = [
         (r, c)
@@ -216,7 +217,7 @@ def handle_move(data):
                 to_cell["troops"] = remaining
                 if to_cell["isSpawn"] and not to_cell["spawnActive"]:
                     to_cell["spawnActive"] = True
-                if to_cell["isCorner"]:
+                if to_cell["isCorner"] and to_cell["originalTeam"] == defeated_team:
                     for row in board:
                         for cell in row:
                             if cell.get("owner") == defeated_team:
