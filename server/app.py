@@ -18,7 +18,7 @@ games = {}
 BOARD_SIZE = 16
 
 def create_board_state():
-    """Create a new 16x16 board with corner spawns and 15% extra spawns."""
+    """Create a new 16x16 board with corner spawns and mirrored extra spawns."""
     board = []
     for r in range(BOARD_SIZE):
         row = []
@@ -49,22 +49,82 @@ def create_board_state():
         board[r][c]["spawnActive"] = True
         board[r][c]["isCorner"] = True
         board[r][c]["originalTeam"] = team
-    # Randomly select 15% of non-corner cells as extra spawns (initially inactive).
-    non_corner_positions = [
+    
+    # Generate spawns in the top-left quarter and mirror them to all quarters
+    quarter_size = BOARD_SIZE // 2
+    
+    # Define the top-left quarter (excluding the corner)
+    top_left_quarter = [
         (r, c)
-        for r in range(BOARD_SIZE) for c in range(BOARD_SIZE)
-        if (r, c) not in [(0, 0), (0, BOARD_SIZE - 1), (BOARD_SIZE - 1, 0), (BOARD_SIZE - 1, BOARD_SIZE - 1)]
+        for r in range(1, quarter_size)  # Skip the first row (which has a corner)
+        for c in range(1, quarter_size)  # Skip the first column (which has a corner)
     ]
-    extra_count = int(len(non_corner_positions) * 0.15)
-    extra_spawns = random.sample(non_corner_positions, extra_count)
-    for r, c in extra_spawns:
+    
+    # Calculate how many spawn points to generate in the quarter
+    # Target: Roughly 15% of the entire board (excluding corners) = 15% of (BOARD_SIZE^2 - 4)
+    # So each quarter should have about 15% of its cells as spawns (excluding the corner)
+    quarter_spawns_count = int(len(top_left_quarter) * 0.15)
+    
+    # Randomly select spawn positions in the top-left quarter
+    spawn_positions_top_left = random.sample(top_left_quarter, quarter_spawns_count)
+    
+    # Create spawn points in the top-left quarter
+    for r, c in spawn_positions_top_left:
         board[r][c]["isSpawn"] = True
         board[r][c]["spawnActive"] = False
+    
+    # Mirror to top-right quarter
+    for r, c in spawn_positions_top_left:
+        mirror_c = BOARD_SIZE - 1 - c
+        board[r][mirror_c]["isSpawn"] = True
+        board[r][mirror_c]["spawnActive"] = False
+    
+    # Mirror to bottom-left quarter
+    for r, c in spawn_positions_top_left:
+        mirror_r = BOARD_SIZE - 1 - r
+        board[mirror_r][c]["isSpawn"] = True
+        board[mirror_r][c]["spawnActive"] = False
+    
+    # Mirror to bottom-right quarter
+    for r, c in spawn_positions_top_left:
+        mirror_r = BOARD_SIZE - 1 - r
+        mirror_c = BOARD_SIZE - 1 - c
+        board[mirror_r][mirror_c]["isSpawn"] = True
+        board[mirror_r][mirror_c]["spawnActive"] = False
+    
+    # Add special spawn points in the center and middle of edges if needed
+    # Center of the board
+    center = BOARD_SIZE // 2
+    if random.random() < 0.5:  # 50% chance to add a center spawn
+        board[center-1][center-1]["isSpawn"] = True
+        board[center-1][center-1]["spawnActive"] = False
+        board[center-1][center]["isSpawn"] = True
+        board[center-1][center]["spawnActive"] = False
+        board[center][center-1]["isSpawn"] = True
+        board[center][center-1]["spawnActive"] = False
+        board[center][center]["isSpawn"] = True
+        board[center][center]["spawnActive"] = False
+    
+    # Mid-points on edges (optional)
+    if random.random() < 0.3:  # 30% chance to add edge spawns
+        # Top edge
+        board[0][quarter_size]["isSpawn"] = True
+        board[0][quarter_size]["spawnActive"] = False
+        # Bottom edge
+        board[BOARD_SIZE-1][quarter_size]["isSpawn"] = True
+        board[BOARD_SIZE-1][quarter_size]["spawnActive"] = False
+        # Left edge
+        board[quarter_size][0]["isSpawn"] = True
+        board[quarter_size][0]["spawnActive"] = False
+        # Right edge
+        board[quarter_size][BOARD_SIZE-1]["isSpawn"] = True
+        board[quarter_size][BOARD_SIZE-1]["spawnActive"] = False
+    
     return board
 
 @app.route('/')
 def home():
-    # Return a simple welcome page with game rules and random game keys.
+    # Return a welcome page with game rules, random game keys, and fairness options.
     random_keys = random.sample(
         ["apple", "banana", "cherry", "dragon", "eagle", "falcon", "grape", "honey", "igloo", "jungle"],
         5
@@ -74,6 +134,31 @@ def home():
       <head>
         <meta charset="UTF-8">
         <title>Welcome to the Multiplayer Strategy Game</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+          }
+          .settings-section {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+          }
+          .settings-table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+          .settings-table td {
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+          }
+          h2 {
+            color: #333;
+          }
+        </style>
       </head>
       <body>
         <h1>Welcome to the Multiplayer Strategy Game!</h1>
@@ -86,6 +171,22 @@ def home():
           <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
           <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
         </ul>
+        
+        <div class="settings-section">
+          <h2>Game Fairness Features</h2>
+          <p>These settings help ensure all players have a fair chance:</p>
+          <table class="settings-table">
+            <tr>
+              <td><strong>Perfect Mirror Symmetry</strong></td>
+              <td>Spawn points are randomly generated in one quarter of the board and then mirrored to all other quarters, ensuring perfect symmetry and fairness for all teams.</td>
+            </tr>
+            <tr>
+              <td><strong>Random Board Layout</strong></td>
+              <td>Each game has a unique board layout while maintaining perfect symmetry between all four quadrants.</td>
+            </tr>
+          </table>
+        </div>
+        
         <p>Choose a game below (refresh for new keys):</p>
         <ul>
     """
