@@ -80,6 +80,13 @@ body {
   user-select: none;
 }
 
+/* Style for white cells (non-spawn cells with no owner) */
+.cell:not(.spawn):not(.red):not(.blue):not(.green):not(.yellow) {
+  cursor: not-allowed;
+  filter: brightness(0.95);
+  border: 1px dashed #ccc;
+}
+
 .cell.selected {
   outline: 3px solid #ff0;
 }
