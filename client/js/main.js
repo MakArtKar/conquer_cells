@@ -388,6 +388,12 @@ function initializeGame(gameKey) {
 
     // If no cell is selected
     if (!selectedCell) {
+      // Skip white non-spawn cells (cells with no owner that are not spawn cells)
+      if (!cellData.owner && !cellData.isSpawn) {
+        console.log(`Can't select white cell at (${r},${c})`);
+        return;
+      }
+      
       // Can only select cells that belong to player's team and have troops
       if (cellData.owner === currentPlayer.team && cellData.troops > 0) {
         selectedCell = { row: r, col: c, element: this };
@@ -402,6 +408,12 @@ function initializeGame(gameKey) {
         this.classList.remove("selected");
         selectedCell = null;
         console.log(`Deselected cell at (${r},${c})`);
+        return;
+      }
+
+      // Prevent moving to white non-spawn cells
+      if (!cellData.owner && !cellData.isSpawn) {
+        console.log(`Can't move to white cell at (${r},${c})`);
         return;
       }
 

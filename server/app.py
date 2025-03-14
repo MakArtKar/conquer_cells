@@ -175,6 +175,11 @@ def handle_move(data):
 
     from_cell = board[from_row][from_col]
     to_cell = board[to_row][to_col]
+    
+    # Prevent moves from or to white cells (non-spawn cells without an owner)
+    if (from_cell["owner"] is None and not from_cell["isSpawn"]) or (to_cell["owner"] is None and not to_cell["isSpawn"]):
+        print(f"Move rejected: can't move from/to white cell. From: {from_row},{from_col} To: {to_row},{to_col}")
+        return
 
     # Remove troops from the source cell immediately.
     from_cell["troops"] = 0
