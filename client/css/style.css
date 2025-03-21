@@ -87,10 +87,6 @@ body {
   border: 1px dashed #ccc;
 }
 
-.cell.selected {
-  outline: 3px solid #ff0;
-}
-
 .cell.red {
   background-color: #ffaaaa;
 }
@@ -270,14 +266,27 @@ tr.yellow-row.current-player-team {
   filter: brightness(0.9);
 }
 
-/* Selected cell animation */
+/* Selected cell animation with DRAMATICALLY increased visibility */
 .cell.selected {
-  outline: 3px solid #ff0;
-  animation: pulse 1s infinite;
+  outline: 8px solid #ff0; /* Increased from 6px to 8px */
+  box-shadow: 0 0 20px 5px #ff0, inset 0 0 10px #ff0; /* Stronger glow */
+  position: relative;
+  z-index: 5;
+  border: 2px solid #000; /* Add black border inside */
+  transform: scale(1.05); /* Slightly increase size */
 }
 
 @keyframes pulse {
-  0% { outline-color: rgba(255, 255, 0, 1); }
-  50% { outline-color: rgba(255, 255, 0, 0.5); }
-  100% { outline-color: rgba(255, 255, 0, 1); }
+  0% { 
+    outline-color: rgba(255, 255, 0, 1);
+    box-shadow: 0 0 20px 5px rgba(255, 255, 0, 1), inset 0 0 10px rgba(255, 255, 0, 1);
+  }
+  50% { 
+    outline-color: rgba(255, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(255, 255, 0, 0.5), inset 0 0 5px rgba(255, 255, 0, 0.5);
+  }
+  100% { 
+    outline-color: rgba(255, 255, 0, 1);
+    box-shadow: 0 0 20px 5px rgba(255, 255, 0, 1), inset 0 0 10px rgba(255, 255, 0, 1);
+  }
 }
