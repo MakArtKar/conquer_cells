@@ -364,7 +364,18 @@ function initializeGame(gameKey) {
         const cellData = newBoard[r][c];
         const cellDiv = boardCells[r][c];
         cellDiv.innerText = cellData.troops > 0 ? cellData.troops : "";
+        
+        // Check if this cell is currently selected before changing classes
+        const isSelected = cellDiv.classList.contains('selected');
+        
+        // Reset class
         cellDiv.className = "cell";
+        
+        // Restore selected class if it was selected
+        if (isSelected) {
+          cellDiv.classList.add('selected');
+        }
+        
         if (cellData.owner) {
           cellDiv.classList.add(cellData.owner);
         }

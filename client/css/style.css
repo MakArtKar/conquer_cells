@@ -274,6 +274,7 @@ tr.yellow-row.current-player-team {
   z-index: 5;
   border: 2px solid #000; /* Add black border inside */
   transform: scale(1.05); /* Slightly increase size */
+  animation: pulse 1s infinite; /* Adding pulse animation */
 }
 
 @keyframes pulse {
