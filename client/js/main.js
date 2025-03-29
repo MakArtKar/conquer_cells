@@ -135,7 +135,7 @@ function initializeGame(gameKey) {
           </label>
           <label style="display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="team" value="yellow">
-            <span style="color: #ffffaa;">Yellow Team</span>
+            <span style="color: #ffc935;">Orange Team</span>
           </label>
         </div>
       </div>
@@ -511,18 +511,21 @@ function initializeGame(gameKey) {
         const x = anim.startPos.x + (anim.endPos.x - anim.startPos.x) * progress;
         const y = anim.startPos.y + (anim.endPos.y - anim.startPos.y) * progress;
         
+        // Use orange color for yellow team
+        const teamColor = anim.team === 'yellow' ? '#ffc935' : anim.team;
+        
         // Draw line from start to end
         ctx.beginPath();
         ctx.moveTo(anim.startPos.x, anim.startPos.y);
         ctx.lineTo(anim.endPos.x, anim.endPos.y);
-        ctx.strokeStyle = anim.team;
+        ctx.strokeStyle = teamColor;
         ctx.lineWidth = 2;
         ctx.stroke();
         
         // Draw moving troops circle
         ctx.beginPath();
         ctx.arc(x, y, 10, 0, Math.PI * 2);
-        ctx.fillStyle = anim.team;
+        ctx.fillStyle = teamColor;
         ctx.fill();
         ctx.fillStyle = 'white';
         ctx.textAlign = 'center';
@@ -604,7 +607,7 @@ function initializeGame(gameKey) {
             const isCurrentTeam = team === currentPlayer.team;
             return `
               <tr class="${team}-row${isCurrentTeam ? ' current-player-team' : ''}">
-                <td class="team-name">${team.charAt(0).toUpperCase() + team.slice(1)}</td>
+                <td class="team-name">${team === 'yellow' ? 'Orange' : team.charAt(0).toUpperCase() + team.slice(1)}</td>
                 <td class="player-names">${stats.players.length > 0 ? stats.players.join(', ') : '-'}</td>
                 <td class="stat-value">${stats.troops}</td>
                 <td class="stat-value">${stats.spawns}</td>

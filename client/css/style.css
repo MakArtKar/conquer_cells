@@ -100,7 +100,7 @@ body {
 }
 
 .cell.yellow {
-  background-color: #ffffaa;
+  background-color: #ffc935;
 }
 
 .cell.neutral {
@@ -235,7 +235,7 @@ body {
 }
 
 .yellow-row {
-  background-color: rgba(255, 255, 0, 0.1);
+  background-color: rgba(255, 201, 53, 0.1);
 }
 
 /* Current player's team highlighting */
@@ -258,7 +258,7 @@ tr.green-row.current-player-team {
 }
 
 tr.yellow-row.current-player-team {
-  background-color: rgba(255, 255, 0, 0.2);
+  background-color: rgba(255, 201, 53, 0.2);
 }
 
 /* Cell hover effect */
@@ -268,26 +268,26 @@ tr.yellow-row.current-player-team {
 
 /* Selected cell animation with DRAMATICALLY increased visibility */
 .cell.selected {
-  outline: 8px solid #ff0; /* Increased from 6px to 8px */
-  box-shadow: 0 0 20px 5px #ff0, inset 0 0 10px #ff0; /* Stronger glow */
+  outline: 8px solid #ffc935;
+  box-shadow: 0 0 20px 5px #ffc935, inset 0 0 10px #ffc935;
   position: relative;
   z-index: 5;
-  border: 2px solid #000; /* Add black border inside */
-  transform: scale(1.05); /* Slightly increase size */
-  animation: pulse 1s infinite; /* Adding pulse animation */
+  border: 2px solid #000;
+  transform: scale(1.05);
+  animation: pulse 1s infinite;
 }
 
 @keyframes pulse {
   0% { 
-    outline-color: rgba(255, 255, 0, 1);
-    box-shadow: 0 0 20px 5px rgba(255, 255, 0, 1), inset 0 0 10px rgba(255, 255, 0, 1);
+    outline-color: rgba(255, 201, 53, 1);
+    box-shadow: 0 0 20px 5px rgba(255, 201, 53, 1), inset 0 0 10px rgba(255, 201, 53, 1);
   }
   50% { 
-    outline-color: rgba(255, 255, 0, 0.5);
-    box-shadow: 0 0 10px rgba(255, 255, 0, 0.5), inset 0 0 5px rgba(255, 255, 0, 0.5);
+    outline-color: rgba(255, 201, 53, 0.5);
+    box-shadow: 0 0 10px rgba(255, 201, 53, 0.5), inset 0 0 5px rgba(255, 201, 53, 0.5);
   }
   100% { 
-    outline-color: rgba(255, 255, 0, 1);
-    box-shadow: 0 0 20px 5px rgba(255, 255, 0, 1), inset 0 0 10px rgba(255, 255, 0, 1);
+    outline-color: rgba(255, 201, 53, 1);
+    box-shadow: 0 0 20px 5px rgba(255, 201, 53, 1), inset 0 0 10px rgba(255, 201, 53, 1);
   }
 }
