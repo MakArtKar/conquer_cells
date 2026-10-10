@@ -32,54 +32,87 @@ def clamp_players(num_players):
 def cell_distance(a, b):
     return math.hypot(a["x"] - b["x"], a["y"] - b["y"])
 
-class DummyBot:
+class Bot:
+    """A bot plays a color without human players. The rules are the same for every bot: at most
+    one move per second, and a move sends all troops of the cell, as a player's click does."""
+    label = None
+
+    def move(self, game, team):
+        """Return the move to start this second as (from cell id, to cell id), or None."""
+        return None
+
+    def attacked(self, game, team, attacker):
+        """Called when troops of the attacker color land on a cell of the bot's color."""
+
+class DummyBot(Bot):
     """Does nothing: its color keeps its base and the troops there."""
     label = "Dummy"
 
-    def moves(self, game, team):
-        """Return the moves to start this second, as (from cell id, to cell id) pairs. Like a
-        player's click, a move sends all troops of the cell."""
-        return []
+def own_base(game, team):
+    """The team's own base while the team holds it, else None (and the team has no cells)."""
+    return next((c for c in game["board"] if c["isBase"] and c["originalTeam"] == team and c["owner"] == team), None)
 
-class PeaceBot:
-    """Takes free cells and never attacks. Every TURN_SECONDS it starts one move, without
-    waiting for earlier moves to arrive: its fullest cell with more than SEND_HOME_ABOVE troops
-    sends them to its base; if no cell has that many, its cell nearest to a free cell takes it.
-    The base only takes free cells while no other cell has troops (at the start)."""
+class PeaceBot(Bot):
+    """Takes free cells and never attacks. Each second: its fullest cell with more than
+    SEND_HOME_ABOVE troops sends them to its base; if no cell has that many, its cell nearest to
+    a free cell takes it. The base only takes free cells while no other cell has troops (at the
+    start). It does not wait for earlier moves to arrive."""
     label = "Peace"
-    TURN_SECONDS = 1
     SEND_HOME_ABOVE = 25  # Fewer, bigger moves to the base: less clutter on the board.
 
     def __init__(self):
-        self.second = 0  # moves() is called once per second of play
+        self.second = 0  # move() is called once per second of play
         self.arrivals = {}  # Free cell id -> second when our troops reach it
 
-    def moves(self, game, team):
+    def move(self, game, team):
         self.second += 1
-        if self.second % self.TURN_SECONDS:
-            return []
         board = game["board"]
-        base = next((c for c in board if c["isBase"] and c["originalTeam"] == team and c["owner"] == team), None)
+        base = own_base(game, team)
         if base is None:
-            return []  # The base is lost, and all cells with it.
+            return None
 
         others = [c for c in board if c["owner"] == team and c is not base and c["troops"] > 0]
         crowded = [c for c in others if c["troops"] > self.SEND_HOME_ABOVE]
         if crowded:
-            return [(max(crowded, key=lambda c: c["troops"])["id"], base["id"])]
+            return (max(crowded, key=lambda c: c["troops"])["id"], base["id"])
 
         self.arrivals = {cell_id: second for cell_id, second in self.arrivals.items() if second >= self.second}
         free = [c for c in board if c["owner"] is None and c["isSpawn"] and c["id"] not in self.arrivals]
         sources = others or ([base] if base["troops"] > 0 else [])
         if not sources or not free:
-            return []
+            return None
         source, target = min(((o, f) for o in sources for f in free), key=lambda pair: cell_distance(*pair))
         self.arrivals[target["id"]] = self.second + math.ceil(cell_distance(source, target))
-        return [(source["id"], target["id"])]
+        return (source["id"], target["id"])
+
+class KushchushchaBot(PeaceBot):
+    """Plays like Peace until a color attacks it. Then each second its fullest cell, the base
+    included, sends all troops to the base of that color, until that color has no base; then
+    the next color that attacked it, or Peace again."""
+    label = "Кущуща"
+
+    def __init__(self):
+        super().__init__()
+        self.enemies = []  # Colors that attacked, in order
+
+    def attacked(self, game, team, attacker):
+        if attacker not in self.enemies:
+            self.enemies.append(attacker)
+
+    def move(self, game, team):
+        while self.enemies and own_base(game, self.enemies[0]) is None:
+            self.enemies.pop(0)  # That color has lost its base.
+        if not self.enemies:
+            return super().move(game, team)
+        self.second += 1  # Keep Peace's clock for its free cell bookkeeping.
+        own = [c for c in game["board"] if c["owner"] == team and c["troops"] > 0]
+        if not own:
+            return None
+        return (max(own, key=lambda c: c["troops"])["id"], own_base(game, self.enemies[0])["id"])
 
 # Bot classes by kind. A color without human players is played by the bot chosen for it in the
 # lobby; each game creates its own bot objects, so bots can keep state between seconds.
-BOTS = {"dummy": DummyBot, "peace": PeaceBot}
+BOTS = {"dummy": DummyBot, "peace": PeaceBot, "kushchushcha": KushchushchaBot}
 DEFAULT_BOT = "dummy"
 BOT_OPTIONS = [{"kind": kind, "label": bot.label} for kind, bot in BOTS.items()]
 
@@ -505,6 +538,7 @@ def launch_move(game_key, game, move):
 
     # Remove troops from the source cell immediately.
     from_cell["troops"] = 0
+    target_owner = to_cell["owner"]  # At the start: an attack is a move aimed at a cell of that color.
 
     # Calculate Euclidean distance and duration.
     distance = cell_distance(from_cell, to_cell)
@@ -530,6 +564,7 @@ def launch_move(game_key, game, move):
             
         # Process the move.
         changed = [to_cell]  # Cells to send with end_move; the whole board goes out every second.
+        defending_team = to_cell["owner"]
         if to_cell["owner"] is None:
             to_cell["owner"] = attacking_team
             to_cell["troops"] = attacking_troops
@@ -560,6 +595,11 @@ def launch_move(game_key, game, move):
                 to_cell["owner"] = None
                 to_cell["spawnActive"] = False
 
+        # A bot learns that it was attacked. Troops that set out for a free cell and found it taken
+        # meanwhile do not count.
+        if defending_team not in (None, attacking_team) and defending_team == target_owner and defending_team not in human_teams(game):
+            bot_for(game_key, game, defending_team).attacked(game, defending_team, attacking_team)
+
         # Emit end_move event with move_id and the changed cells.
         socketio.emit('end_move', {"move_id": move_id, "cells": changed}, room=game_key)
         print(f"Emitted end_move for game {game_key} with move_id {move_id}.")
@@ -580,19 +620,26 @@ def generate_troops():
 
 bot_players = {}  # Game key -> (game, {team: bot object}); the game check drops bots of an old game.
 
-def run_bots(game_key, game):
-    """Let the bot of every color without human players start its moves for this second."""
+def bot_for(game_key, game, team):
+    """The bot object that plays the team in this game; made on first use."""
     if game_key not in bot_players or bot_players[game_key][0] is not game:
         bot_players[game_key] = (game, {})
     bots = bot_players[game_key][1]
-    human_teams = {player["team"] for player in game["players"].values()}
+    if team not in bots:
+        bots[team] = BOTS[game["bots"][team]]()
+    return bots[team]
+
+def human_teams(game):
+    return {player["team"] for player in game["players"].values()}
+
+def run_bots(game_key, game):
+    """Let the bot of every color without human players start its move for this second."""
+    humans = human_teams(game)
     for team in game["teams"]:
-        if team in human_teams:
-            continue
-        if team not in bots:
-            bots[team] = BOTS[game["bots"][team]]()
-        for from_id, to_id in bots[team].moves(game, team):
-            launch_move(game_key, game, {"game_key": game_key, "from": from_id, "to": to_id, "team": team})
+        if team not in humans:
+            move = bot_for(game_key, game, team).move(game, team)
+            if move:
+                launch_move(game_key, game, {"game_key": game_key, "from": move[0], "to": move[1], "team": team})
 
 @socketio.on('finish_game')
 def handle_finish_game(data):
