@@ -1,12 +1,30 @@
-// Constant variables for board dimensions
-const CELL_SIZE = 80;                   // Cell size in pixels.
-const GAP_SIZE = 1;                     // Gap between cells in pixels.
-const CELL_TOTAL = CELL_SIZE + GAP_SIZE; // Total space per cell.
-const CELL_CENTER_OFFSET = CELL_SIZE / 2;  // Center offset (40px).
+// Board layout. The server gives the cell shapes in cells (neighbor distance 1, center at 0,0);
+// renderBoard picks the pixel size of one cell so the board fits the window.
+const MAX_BOARD_WIDTH = 1100;   // Board width limit in pixels.
+const RESERVED_HEIGHT = 150;    // Window height used by the controls and margins, in pixels.
+const BOARD_PADDING = 8;        // Room around the cells for thick outlines and the enlarged selected cell, in pixels.
+const MIN_CELL_SPACING = 24;    // Pixel distance between neighboring cells, lower limit.
+const MAX_CELL_SPACING = 64;    // Pixel distance between neighboring cells, upper limit.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+const MIN_PLAYERS = 2;
+const MAX_PLAYERS = 6;
+const DEFAULT_PLAYERS = 4;
+
+// Display settings per team. An N-player game uses the first N teams of the server's list.
+const TEAM_STYLES = {
+  red:    { label: 'Red',    fill: '#ffaaaa', line: 'red' },
+  blue:   { label: 'Blue',   fill: '#aaaaff', line: 'blue' },
+  green:  { label: 'Green',  fill: '#aaffaa', line: 'green' },
+  yellow: { label: 'Orange', fill: '#ffc935', line: '#ffc935' },
+  purple: { label: 'Purple', fill: '#d9b3ff', line: '#9b30ff' },
+  cyan:   { label: 'Cyan',   fill: '#a0eeee', line: '#00a0a0' }
+};
 
 // Global variables
 let moveAnimations = [];  // Array to store active move animations
-let boardCells = [];
+let boardCells = [];  // Cell elements, indexed by cell id
+let boardLayout = null;  // Pixel scale and offset of the rendered board
 let boardState = null;
 let selectedCell = null;
 let gameState = null;  // Store complete game state
@@ -25,8 +43,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const gameKey = path.substring(1); // Remove the leading "/"
+  const requestedPlayers = new URLSearchParams(window.location.search).get('players');
   renderGamePage(appDiv);
-  initializeGame(gameKey);
+  initializeGame(gameKey, requestedPlayers);
 });
 
 function generateRandomKeys(n) {
@@ -49,13 +68,15 @@ function renderWelcomePage(appDiv) {
       <h1>Welcome to the Multiplayer Strategy Game!</h1>
       <p><strong>Game Rules:</strong></p>
       <ul>
-        <li>The board is 16x16 with four corner spawns.</li>
+        <li>Choose 2 to 6 players. The board is a polygon grid with one base per player in its corners: squares for 2 and 4 players, triangles for 3, a pentagon of quadrilaterals for 5, hexagons for 6.</li>
         <li>Extra (grey) spawns generate troops only after they are conquered.</li>
         <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
         <li>If you conquer a cell, it changes to your team's color.</li>
-        <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
+        <li>If you conquer your enemy's base, then all cells owned by that enemy become yours.</li>
         <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
       </ul>
+      <p>Number of players:</p>
+      <div id="player-count" class="player-count"></div>
       <p>Choose a game below (refresh for new keys):</p>
       <ul id="game-links"></ul>
     </div>
@@ -63,14 +84,32 @@ function renderWelcomePage(appDiv) {
   appDiv.innerHTML = welcomeHTML;
   const gameLinksUl = document.getElementById("game-links");
   const keys = generateRandomKeys(5);
-  keys.forEach(key => {
+  const gameLinks = keys.map(key => {
     const li = document.createElement("li");
     const a = document.createElement("a");
-    a.href = "/" + key;
+    a.dataset.key = key;
     a.textContent = key.charAt(0).toUpperCase() + key.slice(1);
     li.appendChild(a);
     gameLinksUl.appendChild(li);
+    return a;
   });
+
+  // The selected player count goes into the game links; the first player to join creates the game.
+  const playerCountDiv = document.getElementById("player-count");
+  const selectPlayerCount = (count) => {
+    playerCountDiv.querySelectorAll('button').forEach(button => {
+      button.classList.toggle('selected', Number(button.dataset.count) === count);
+    });
+    gameLinks.forEach(a => { a.href = `/${a.dataset.key}?players=${count}`; });
+  };
+  for (let count = MIN_PLAYERS; count <= MAX_PLAYERS; count++) {
+    const button = document.createElement("button");
+    button.dataset.count = count;
+    button.textContent = count;
+    button.addEventListener('click', () => selectPlayerCount(count));
+    playerCountDiv.appendChild(button);
+  }
+  selectPlayerCount(DEFAULT_PLAYERS);
 }
 
 function renderGamePage(appDiv) {
@@ -89,12 +128,14 @@ function renderGamePage(appDiv) {
   appDiv.innerHTML = gameHTML;
 }
 
-function initializeGame(gameKey) {
+function initializeGame(gameKey, requestedPlayers) {
   const socket = io();
   let updateLeaderboardInterval;  // Store interval ID for cleanup
   let animationFrameId;  // Store animation frame ID for cleanup
-  
-  // Create modal dialog for player input
+
+  let gameInfo = null;  // Player count and teams of this game, from the server
+
+  // Create modal dialog for player input; the teams are filled in when the game info arrives.
   const modalHtml = `
     <div id="player-input-modal" style="
       position: fixed;
@@ -108,6 +149,7 @@ function initializeGame(gameKey) {
       z-index: 1000;
     ">
       <h2 style="margin-top: 0;">Join Game</h2>
+      <p id="game-player-count" style="margin-top: 0; color: #555;"></p>
       <div style="margin-bottom: 15px;">
         <label>Your Name:</label>
         <input type="text" id="player-name" style="
@@ -120,26 +162,9 @@ function initializeGame(gameKey) {
       </div>
       <div style="margin-bottom: 15px;">
         <label>Select Team:</label>
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 5px;">
-          <label style="display: flex; align-items: center; gap: 5px;">
-            <input type="radio" name="team" value="red" required>
-            <span style="color: #ffaaaa;">Red Team</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 5px;">
-            <input type="radio" name="team" value="blue">
-            <span style="color: #aaaaff;">Blue Team</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 5px;">
-            <input type="radio" name="team" value="green">
-            <span style="color: #aaffaa;">Green Team</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 5px;">
-            <input type="radio" name="team" value="yellow">
-            <span style="color: #ffc935;">Orange Team</span>
-          </label>
-        </div>
+        <div id="team-options" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 5px;"></div>
       </div>
-      <button id="join-game-btn" style="
+      <button id="join-game-btn" disabled style="
         width: 100%;
         padding: 10px;
         background: #4CAF50;
@@ -164,6 +189,21 @@ function initializeGame(gameKey) {
   const modalContainer = document.createElement('div');
   modalContainer.innerHTML = modalHtml;
   document.body.appendChild(modalContainer);
+
+  // Ask the server for the game's player count: an existing game keeps its own count.
+  socket.emit('game_info', { game_key: gameKey, players: requestedPlayers }, (info) => {
+    gameInfo = info;
+    // Keep the actual player count in the URL, so a shared link creates the same game again.
+    window.history.replaceState(null, '', `/${gameKey}?players=${info.numPlayers}`);
+    document.getElementById('game-player-count').textContent = `${info.numPlayers}-player game`;
+    document.getElementById('team-options').innerHTML = info.teams.map((team, i) => `
+      <label style="display: flex; align-items: center; gap: 5px;">
+        <input type="radio" name="team" value="${team}"${i === 0 ? ' required' : ''}>
+        <span style="color: ${TEAM_STYLES[team].fill};">${TEAM_STYLES[team].label} Team</span>
+      </label>
+    `).join('');
+    document.getElementById('join-game-btn').disabled = false;
+  });
 
   // Set up all socket event handlers first
   socket.on('pause_state', (data) => {
@@ -232,7 +272,8 @@ function initializeGame(gameKey) {
       if (state.board) {
         boardState = state.board;
         if (boardCells.length === 0) {
-          renderBoard(boardState);
+          if (!state.layout) return;  // Only the reply to join_game has the cell shapes
+          renderBoard(state);
         }
         updateBoard(boardState);
         updateLeaderboard();
@@ -259,7 +300,8 @@ function initializeGame(gameKey) {
     socket.emit('join_game', { 
       game_key: gameKey, 
       player_name: validatedName, 
-      team: validatedTeam 
+      team: validatedTeam,
+      players: gameInfo.numPlayers
     });
 
     // Add pause button handler
@@ -281,11 +323,9 @@ function initializeGame(gameKey) {
 
       // Remove click handlers from all cells
       if (boardCells) {
-        boardCells.forEach(row => {
-          row.forEach(cell => {
-            cell.removeEventListener('click', onCellClick);
-            cell.style.cursor = 'default';
-          });
+        boardCells.forEach(cell => {
+          cell.removeEventListener('click', onCellClick);
+          cell.style.cursor = 'default';
         });
       }
 
@@ -325,121 +365,169 @@ function initializeGame(gameKey) {
     updateLeaderboardInterval = setInterval(updateLeaderboard, 1000);
   });
 
-  function renderBoard(board) {
+  // Lay out the board: the cell shapes come from the server, the pixel scale fits the window.
+  function renderBoard(state) {
+    const board = state.board;
+    const shapes = state.layout.cells;  // Corner points of each cell, indexed by cell id
+    const container = document.getElementById('board-container');
     const boardElem = document.getElementById('game-board');
-    boardElem.innerHTML = "";
+
+    const corners = shapes.flat();
+    const minX = Math.min(...corners.map(p => p[0]));
+    const minY = Math.min(...corners.map(p => p[1]));
+    const width = Math.max(...corners.map(p => p[0])) - minX;
+    const height = Math.max(...corners.map(p => p[1])) - minY;
+    const availableWidth = Math.min(window.innerWidth - 40, MAX_BOARD_WIDTH);
+    const availableHeight = window.innerHeight - RESERVED_HEIGHT;
+    const fit = Math.min((availableWidth - 2 * BOARD_PADDING) / width, (availableHeight - 2 * BOARD_PADDING) / height);
+    const spacing = Math.max(MIN_CELL_SPACING, Math.min(MAX_CELL_SPACING, fit));
+    boardLayout = { spacing, minX, minY };
+
+    // The dark board shape behind the cells shows through the hovered (half transparent) cell.
+    const boardWidth = width * spacing + 2 * BOARD_PADDING;
+    const boardHeight = height * spacing + 2 * BOARD_PADDING;
+    container.style.width = `${boardWidth}px`;
+    container.style.height = `${boardHeight}px`;
+    boardElem.innerHTML = `
+      <svg class="board-shape" width="${boardWidth}" height="${boardHeight}">
+        <path class="board-outline" d="${shapes.map(shape => `M${polygonPoints(shape)}Z`).join('')}"></path>
+      </svg>
+    `;
+    const svg = boardElem.querySelector('svg');
+
+    // One font size for the whole board, so that a 3-digit count fits into the smallest cell.
+    const minInradius = Math.min(...board.map(cell => distanceToSides([cell.x, cell.y], shapes[cell.id])));
+    const fontSize = Math.max(9, Math.round(minInradius * spacing * 0.75));
+
+    // Spawns and bases go last: in SVG a later cell covers the outer half of an earlier cell's outline.
+    const drawOrder = [...board].sort((a, b) => (a.isSpawn + a.isBase) - (b.isSpawn + b.isBase));
     boardCells = [];
-    for (let r = 0; r < board.length; r++) {
-      let rowCells = [];
-      for (let c = 0; c < board[r].length; c++) {
-        const cellData = board[r][c];
-        const cellDiv = document.createElement('div');
-        cellDiv.className = "cell";
-        if (cellData.owner) {
-          cellDiv.classList.add(cellData.owner);
-        }
-        if (cellData.isSpawn) {
-          cellDiv.classList.add("spawn");
-          if (!cellData.spawnActive && !cellData.owner) {
-            cellDiv.classList.add("inactive-spawn");
-          }
-        }
-        cellDiv.innerText = cellData.troops > 0 ? cellData.troops : "";
-        cellDiv.dataset.row = r;
-        cellDiv.dataset.col = c;
-        cellDiv.addEventListener('click', onCellClick);
-        boardElem.appendChild(cellDiv);
-        rowCells.push(cellDiv);
-      }
-      boardCells.push(rowCells);
-    }
+    drawOrder.forEach(cellData => {
+      const center = toPixels(cellData.x, cellData.y);
+      const cellElem = document.createElementNS(SVG_NS, 'g');
+      const shapeElem = document.createElementNS(SVG_NS, 'polygon');
+      shapeElem.setAttribute('points', polygonPoints(shapes[cellData.id]));
+      const troopsElem = document.createElementNS(SVG_NS, 'text');
+      troopsElem.setAttribute('x', center.x);
+      troopsElem.setAttribute('y', center.y);
+      troopsElem.setAttribute('font-size', fontSize);
+      cellElem.append(shapeElem, troopsElem);
+      cellElem.dataset.id = cellData.id;
+      applyCellState(cellElem, cellData);
+      cellElem.addEventListener('click', onCellClick);
+      svg.appendChild(cellElem);
+      boardCells[cellData.id] = cellElem;
+    });
     console.log(`Client rendered board at ${new Date().toLocaleTimeString()}.`);
     drawActiveMoveVectors();
     updateLeaderboard();
   }
 
-  function updateBoard(newBoard) {
-    for (let r = 0; r < newBoard.length; r++) {
-      for (let c = 0; c < newBoard[r].length; c++) {
-        const cellData = newBoard[r][c];
-        const cellDiv = boardCells[r][c];
-        cellDiv.innerText = cellData.troops > 0 ? cellData.troops : "";
-        
-        // Check if this cell is currently selected before changing classes
-        const isSelected = cellDiv.classList.contains('selected');
-        
-        // Reset class
-        cellDiv.className = "cell";
-        
-        // Restore selected class if it was selected
-        if (isSelected) {
-          cellDiv.classList.add('selected');
-        }
-        
-        if (cellData.owner) {
-          cellDiv.classList.add(cellData.owner);
-        }
-        if (cellData.isSpawn) {
-          cellDiv.classList.add("spawn");
-          if (!cellData.spawnActive && !cellData.owner) {
-            cellDiv.classList.add("inactive-spawn");
-          }
-        }
-      }
+  // SVG points of a polygon given in board coordinates.
+  function polygonPoints(corners) {
+    return corners.map(([x, y]) => {
+      const p = toPixels(x, y);
+      return `${p.x},${p.y}`;
+    }).join(' ');
+  }
+
+  // Distance from a point to the nearest side of a convex polygon.
+  function distanceToSides(point, corners) {
+    return Math.min(...corners.map((a, i) => {
+      const b = corners[(i + 1) % corners.length];
+      const cross = (b[0] - a[0]) * (a[1] - point[1]) - (a[0] - point[0]) * (b[1] - a[1]);
+      return Math.abs(cross) / Math.hypot(b[0] - a[0], b[1] - a[1]);
+    }));
+  }
+
+  function toPixels(x, y) {
+    return {
+      x: (x - boardLayout.minX) * boardLayout.spacing + BOARD_PADDING,
+      y: (y - boardLayout.minY) * boardLayout.spacing + BOARD_PADDING
+    };
+  }
+
+  // Set the classes and troop count of a cell element; keeps the selection.
+  function applyCellState(cellElem, cellData) {
+    const isSelected = cellElem.classList.contains('selected');
+    cellElem.setAttribute('class', 'cell');  // SVG elements have no writable className
+    if (isSelected) {
+      cellElem.classList.add('selected');
     }
+    if (cellData.owner) {
+      cellElem.classList.add(cellData.owner);
+    }
+    if (cellData.isSpawn) {
+      cellElem.classList.add("spawn");
+      if (!cellData.spawnActive && !cellData.owner) {
+        cellElem.classList.add("inactive-spawn");
+      }
+    } else if (!cellData.owner) {
+      cellElem.classList.add("empty");
+    }
+    if (cellData.isBase) {
+      cellElem.classList.add("base");
+    }
+    cellElem.lastChild.textContent = cellData.troops > 0 ? cellData.troops : "";
+  }
+
+  function updateBoard(newBoard) {
+    if (boardCells.length === 0) return;  // Not rendered yet
+    newBoard.forEach(cellData => applyCellState(boardCells[cellData.id], cellData));
     boardState = newBoard;
-    drawActiveMoveVectors();
+    // No drawActiveMoveVectors() here: renderBoard started its animation loop already,
+    // and every extra call would start one more loop.
     updateLeaderboard();
   }
 
   function onCellClick() {
-    const r = parseInt(this.dataset.row);
-    const c = parseInt(this.dataset.col);
-    const cellData = boardState[r][c];
+    const id = parseInt(this.dataset.id);
+    const cellData = boardState[id];
 
     // If no cell is selected
     if (!selectedCell) {
       // Skip white non-spawn cells (cells with no owner that are not spawn cells)
       if (!cellData.owner && !cellData.isSpawn) {
-        console.log(`Can't select white cell at (${r},${c})`);
+        console.log(`Can't select white cell ${id}`);
         return;
       }
       
       // Can only select cells that belong to player's team and have troops
       if (cellData.owner === currentPlayer.team && cellData.troops > 0) {
-        selectedCell = { row: r, col: c, element: this };
+        selectedCell = { id: id, element: this };
         this.classList.add("selected");
-        console.log(`Selected cell at (${r},${c}) with ${cellData.troops} troops`);
+        this.parentNode.appendChild(this);  // SVG draws in document order: put the enlarged cell on top
+        console.log(`Selected cell ${id} with ${cellData.troops} troops`);
       }
     } 
     // If a cell is already selected
     else {
       // If clicking the same cell, deselect it
-      if (selectedCell.row === r && selectedCell.col === c) {
+      if (selectedCell.id === id) {
         this.classList.remove("selected");
         selectedCell = null;
-        console.log(`Deselected cell at (${r},${c})`);
+        console.log(`Deselected cell ${id}`);
         return;
       }
 
       // Prevent moving to white non-spawn cells
       if (!cellData.owner && !cellData.isSpawn) {
-        console.log(`Can't move to white cell at (${r},${c})`);
+        console.log(`Can't move to white cell ${id}`);
         return;
       }
 
       // Only allow moves from owned cells
-      const fromCell = boardState[selectedCell.row][selectedCell.col];
+      const fromCell = boardState[selectedCell.id];
       if (fromCell.owner === currentPlayer.team) {
         const moveData = {
           game_key: gameKey,
-          from: { row: selectedCell.row, col: selectedCell.col },
-          to: { row: r, col: c },
+          from: selectedCell.id,
+          to: id,
           troops: fromCell.troops,
           team: currentPlayer.team
         };
         socket.emit('move', moveData);
-        console.log(`Moving ${fromCell.troops} troops from (${selectedCell.row},${selectedCell.col}) to (${r},${c})`);
+        console.log(`Moving ${fromCell.troops} troops from cell ${selectedCell.id} to cell ${id}`);
       }
 
       // Clear selection
@@ -448,28 +536,17 @@ function initializeGame(gameKey) {
     }
   }
 
-  function computeDuration(moveData) {
-    const dx = moveData.to.col - moveData.from.col;
-    const dy = moveData.to.row - moveData.from.row;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    return distance * 1000; // 1 second per cell.
-  }
-
   // Calculate the cell center in local coordinates relative to the board container.
-  function getCellCenter(cellCoords) {
-    return {
-      x: cellCoords.col * CELL_TOTAL + CELL_CENTER_OFFSET,
-      y: cellCoords.row * CELL_TOTAL + CELL_CENTER_OFFSET
-    };
+  function getCellCenter(cellId) {
+    const cell = boardState[cellId];
+    return toPixels(cell.x, cell.y);
   }
 
   function addMoveAnimation(moveData, duration) {
-    const fromCoords = { row: moveData.from.row, col: moveData.from.col };
-    const toCoords = { row: moveData.to.row, col: moveData.to.col };
     const anim = {
       id: moveData.id,
-      startPos: getCellCenter(fromCoords),
-      endPos: getCellCenter(toCoords),
+      startPos: getCellCenter(moveData.from),
+      endPos: getCellCenter(moveData.to),
       duration: duration,
       startTime: performance.now() - totalPauseDuration, // Adjust start time by total pause duration
       team: moveData.team,
@@ -511,8 +588,7 @@ function initializeGame(gameKey) {
         const x = anim.startPos.x + (anim.endPos.x - anim.startPos.x) * progress;
         const y = anim.startPos.y + (anim.endPos.y - anim.startPos.y) * progress;
         
-        // Use orange color for yellow team
-        const teamColor = anim.team === 'yellow' ? '#ffc935' : anim.team;
+        const teamColor = TEAM_STYLES[anim.team] ? TEAM_STYLES[anim.team].line : anim.team;
         
         // Draw line from start to end
         ctx.beginPath();
@@ -554,26 +630,21 @@ function initializeGame(gameKey) {
     if (!gameState) return;  // Don't update if we don't have game state
 
     const leaderboard = document.getElementById('leaderboard');
-    const teamTotals = {
-      red: { troops: 0, spawns: 0, cells: 0, players: [] },
-      blue: { troops: 0, spawns: 0, cells: 0, players: [] },
-      green: { troops: 0, spawns: 0, cells: 0, players: [] },
-      yellow: { troops: 0, spawns: 0, cells: 0, players: [] }
-    };
+    const teamTotals = {};
+    gameState.teams.forEach(team => {
+      teamTotals[team] = { troops: 0, spawns: 0, cells: 0, players: [] };
+    });
     
     // Count board state
-    for (let r = 0; r < boardState.length; r++) {
-      for (let c = 0; c < boardState[r].length; c++) {
-        const cell = boardState[r][c];
-        if (cell.owner && teamTotals[cell.owner]) {
-          teamTotals[cell.owner].troops += cell.troops;
-          teamTotals[cell.owner].cells++;
-          if (cell.isSpawn && cell.spawnActive) {
-            teamTotals[cell.owner].spawns++;
-          }
+    boardState.forEach(cell => {
+      if (cell.owner && teamTotals[cell.owner]) {
+        teamTotals[cell.owner].troops += cell.troops;
+        teamTotals[cell.owner].cells++;
+        if (cell.isSpawn && cell.spawnActive) {
+          teamTotals[cell.owner].spawns++;
         }
       }
-    }
+    });
     
     // Add troops from active moves
     moveAnimations.forEach(anim => {
@@ -607,7 +678,7 @@ function initializeGame(gameKey) {
             const isCurrentTeam = team === currentPlayer.team;
             return `
               <tr class="${team}-row${isCurrentTeam ? ' current-player-team' : ''}">
-                <td class="team-name">${team === 'yellow' ? 'Orange' : team.charAt(0).toUpperCase() + team.slice(1)}</td>
+                <td class="team-name">${TEAM_STYLES[team].label}</td>
                 <td class="player-names">${stats.players.length > 0 ? stats.players.join(', ') : '-'}</td>
                 <td class="stat-value">${stats.troops}</td>
                 <td class="stat-value">${stats.spawns}</td>

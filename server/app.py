@@ -15,112 +15,197 @@ socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 # In-memory dictionary to store game states by game key.
 games = {}
 
-BOARD_SIZE = 16
+TEAMS = ["red", "blue", "green", "yellow", "purple", "cyan"]
+MIN_PLAYERS = 2
+MAX_PLAYERS = len(TEAMS)
+DEFAULT_PLAYERS = 4
+SPAWN_SHARE = 0.15  # Share of each player's cells that become extra spawns.
 
-def create_board_state():
-    """Create a new 16x16 board with corner spawns and mirrored extra spawns."""
-    board = []
-    for r in range(BOARD_SIZE):
-        row = []
-        for c in range(BOARD_SIZE):
-            cell = {
-                "row": r,
-                "col": c,
-                "owner": None,         # Neutral by default.
-                "troops": 0,
-                "isSpawn": False,
-                "spawnActive": False,
-                "isCorner": False,
-                "originalTeam": None,
-            }
-            row.append(cell)
-        board.append(row)
-    
-    # Set corner spawns for four teams.
-    corners = [
-        (0, 0, "red"),
-        (0, BOARD_SIZE - 1, "blue"),
-        (BOARD_SIZE - 1, 0, "green"),
-        (BOARD_SIZE - 1, BOARD_SIZE - 1, "yellow")
+def clamp_players(num_players):
+    """Convert a requested player count to a supported one."""
+    try:
+        num_players = int(num_players)
+    except (TypeError, ValueError):
+        return DEFAULT_PLAYERS
+    return min(max(num_players, MIN_PLAYERS), MAX_PLAYERS)
+
+# Grid sizes, chosen for about 50-60 cells per player.
+SQUARE_SIZE = {2: 11, 4: 15}  # Cells per side.
+TRIANGLE_SIZE = 13            # Cells per side.
+PENTAGON_SIZE = 7             # Cells per side of each of the 5 kites.
+HEXAGON_RADIUS = 10           # Steps from the center cell to a corner cell.
+
+def regular_polygon(sides, radius, start_angle, center=(0.0, 0.0)):
+    """Corners of a regular polygon, by increasing angle (clockwise on screen, where y points down)."""
+    return [
+        (center[0] + radius * math.cos(start_angle + 2 * math.pi * i / sides),
+         center[1] + radius * math.sin(start_angle + 2 * math.pi * i / sides))
+        for i in range(sides)
     ]
-    for r, c, team in corners:
-        board[r][c]["owner"] = team
-        board[r][c]["isSpawn"] = True
-        board[r][c]["spawnActive"] = True
-        board[r][c]["isCorner"] = True
-        board[r][c]["originalTeam"] = team
-    
-    # Generate spawns in the top-left quarter and mirror them to all quarters
-    quarter_size = BOARD_SIZE // 2
-    
-    # Define the top-left quarter (excluding the corner)
-    top_left_quarter = [
-        (r, c)
-        for r in range(1, quarter_size)  # Skip the first row (which has a corner)
-        for c in range(1, quarter_size)  # Skip the first column (which has a corner)
+
+def lerp(p, q, t):
+    return (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
+
+def square_grid(size):
+    """A size x size grid of unit squares; corners start at the top right."""
+    half = size / 2
+    cells = [
+        [(c - half, r - half), (c + 1 - half, r - half), (c + 1 - half, r + 1 - half), (c - half, r + 1 - half)]
+        for r in range(size) for c in range(size)
     ]
-    
-    # Calculate how many spawn points to generate in the quarter
-    # Target: Roughly 15% of the entire board (excluding corners) = 15% of (BOARD_SIZE^2 - 4)
-    # So each quarter should have about 15% of its cells as spawns (excluding the corner)
-    quarter_spawns_count = int(len(top_left_quarter) * 0.15)
-    
-    # Randomly select spawn positions in the top-left quarter
-    spawn_positions_top_left = random.sample(top_left_quarter, quarter_spawns_count)
-    
-    # Create spawn points in the top-left quarter
-    for r, c in spawn_positions_top_left:
-        board[r][c]["isSpawn"] = True
-        board[r][c]["spawnActive"] = False
-    
-    # Mirror to top-right quarter
-    for r, c in spawn_positions_top_left:
-        mirror_c = BOARD_SIZE - 1 - c
-        board[r][mirror_c]["isSpawn"] = True
-        board[r][mirror_c]["spawnActive"] = False
-    
-    # Mirror to bottom-left quarter
-    for r, c in spawn_positions_top_left:
-        mirror_r = BOARD_SIZE - 1 - r
-        board[mirror_r][c]["isSpawn"] = True
-        board[mirror_r][c]["spawnActive"] = False
-    
-    # Mirror to bottom-right quarter
-    for r, c in spawn_positions_top_left:
-        mirror_r = BOARD_SIZE - 1 - r
-        mirror_c = BOARD_SIZE - 1 - c
-        board[mirror_r][mirror_c]["isSpawn"] = True
-        board[mirror_r][mirror_c]["spawnActive"] = False
-    
-    # Add special spawn points in the center and middle of edges if needed
-    # Center of the board
-    center = BOARD_SIZE // 2
-    if random.random() < 0.5:  # 50% chance to add a center spawn
-        board[center-1][center-1]["isSpawn"] = True
-        board[center-1][center-1]["spawnActive"] = False
-        board[center-1][center]["isSpawn"] = True
-        board[center-1][center]["spawnActive"] = False
-        board[center][center-1]["isSpawn"] = True
-        board[center][center-1]["spawnActive"] = False
-        board[center][center]["isSpawn"] = True
-        board[center][center]["spawnActive"] = False
-    
-    # Mid-points on edges (optional)
-    if random.random() < 0.3:  # 30% chance to add edge spawns
-        # Top edge
-        board[0][quarter_size]["isSpawn"] = True
-        board[0][quarter_size]["spawnActive"] = False
-        # Bottom edge
-        board[BOARD_SIZE-1][quarter_size]["isSpawn"] = True
-        board[BOARD_SIZE-1][quarter_size]["spawnActive"] = False
-        # Left edge
-        board[quarter_size][0]["isSpawn"] = True
-        board[quarter_size][0]["spawnActive"] = False
-        # Right edge
-        board[quarter_size][BOARD_SIZE-1]["isSpawn"] = True
-        board[quarter_size][BOARD_SIZE-1]["spawnActive"] = False
-    
-    return board
+    return cells, regular_polygon(4, half * math.sqrt(2), -math.pi / 4)
+
+def triangle_grid(size):
+    """An equilateral triangle (corner at the top) cut into size^2 triangles with side sqrt(3)."""
+    top, right, left = regular_polygon(3, size, -math.pi / 2)
+
+    def point(a, b):
+        # a steps from the top corner toward the bottom left one, b steps toward the bottom right one.
+        return (top[0] + (a * (left[0] - top[0]) + b * (right[0] - top[0])) / size,
+                top[1] + (a * (left[1] - top[1]) + b * (right[1] - top[1])) / size)
+
+    cells = []
+    for a in range(size):
+        for b in range(size - a):
+            cells.append([point(a, b), point(a, b + 1), point(a + 1, b)])  # Pointing up.
+            if a + b + 1 < size:
+                cells.append([point(a, b + 1), point(a + 1, b + 1), point(a + 1, b)])  # Pointing down.
+    return cells, [top, right, left]
+
+def pentagon_grid(size):
+    """A regular pentagon (corner at the top) cut into 5 kites (center, side midpoint, corner,
+    side midpoint), each a size x size grid of quadrilaterals."""
+    corners = regular_polygon(5, 1.0, -math.pi / 2)
+    midpoints = [lerp(corners[i], corners[(i + 1) % 5], 0.5) for i in range(5)]
+    cells = []
+    for i in range(5):
+        center, start, corner, end = (0.0, 0.0), midpoints[i - 1], corners[i], midpoints[i]
+
+        def point(s, t):
+            return lerp(lerp(center, start, s), lerp(end, corner, s), t)
+
+        for a in range(size):
+            for b in range(size):
+                cells.append([point(a / size, b / size), point((a + 1) / size, b / size),
+                              point((a + 1) / size, (b + 1) / size), point(a / size, (b + 1) / size)])
+    return cells, corners
+
+def hexagon_grid(radius):
+    """Pointy-top hexagons (distance 1 between neighbors) within radius steps of the center cell.
+    The board is a hexagon with jagged sides; its corner cells are at 0, 60, ..., 300 degrees."""
+    cells = []
+    for q in range(-radius, radius + 1):
+        for r in range(max(-radius, -q - radius), min(radius, radius - q) + 1):
+            center = (q + r / 2, r * math.sqrt(3) / 2)
+            cells.append(regular_polygon(6, 1 / math.sqrt(3), math.pi / 6, center))
+    return cells, regular_polygon(6, radius, 0)
+
+def board_grid(num_players):
+    """Return (cell corner lists, board corners) for the player count; bases go to the board corners."""
+    if num_players in SQUARE_SIZE:
+        # There is no regular 2-gon: two players get a square with bases in opposite corners.
+        return square_grid(SQUARE_SIZE[num_players])
+    if num_players == 3:
+        return triangle_grid(TRIANGLE_SIZE)
+    if num_players == 5:
+        # Regular pentagons do not tile, so the pentagon is a grid of quadrilaterals.
+        return pentagon_grid(PENTAGON_SIZE)
+    return hexagon_grid(HEXAGON_RADIUS)
+
+def create_board_state(num_players):
+    """Create the board for num_players: a grid with one base per player in the corners.
+
+    Cells are grouped into orbits: sets of cells that rotating the board by 360/num_players
+    degrees moves into each other. Spawns are chosen as whole orbits, so every player gets the
+    same layout. Returns (cells, cell corner lists); coordinates are in cells, with the center at
+    (0, 0) and a median distance of 1 between neighboring cells.
+    """
+    shapes, corners = board_grid(num_players)
+    centers = [(sum(x for x, _ in shape) / len(shape), sum(y for _, y in shape) / len(shape)) for shape in shapes]
+
+    # Scale so that moves take about 1 second per cell on every board.
+    nearest = sorted(min(math.dist(p, q) for q in centers if q is not p) for p in centers)
+    scale = 1 / nearest[len(nearest) // 2]
+    centers = [(x * scale, y * scale) for x, y in centers]
+    shapes = [[(x * scale, y * scale) for x, y in shape] for shape in shapes]
+    corners = [(x * scale, y * scale) for x, y in corners]
+
+    def closest_cell(point):
+        return min(range(len(centers)), key=lambda i: math.dist(point, centers[i]))
+
+    angle = 2 * math.pi / num_players
+    turned = []  # Cell that each cell moves to when the board turns by one player.
+    for x, y in centers:
+        target = (x * math.cos(angle) - y * math.sin(angle), x * math.sin(angle) + y * math.cos(angle))
+        cell_id = closest_cell(target)
+        assert math.dist(target, centers[cell_id]) < 1e-6, "board is not symmetric"
+        turned.append(cell_id)
+
+    orbits = []  # orbit[p] is the cell that p turns move orbit[0] to.
+    in_orbit = set()
+    for cell_id in range(len(centers)):
+        if cell_id in in_orbit:
+            continue
+        orbit = [cell_id]
+        while turned[orbit[-1]] != cell_id:
+            orbit.append(turned[orbit[-1]])
+        in_orbit.update(orbit)
+        orbits.append(orbit)
+
+    cells = [
+        {
+            "id": cell_id,
+            "x": round(x, 4),
+            "y": round(y, 4),
+            "owner": None,         # Neutral by default.
+            "troops": 0,
+            "isSpawn": False,
+            "spawnActive": False,
+            "isBase": False,
+            "originalTeam": None,
+        }
+        for cell_id, (x, y) in enumerate(centers)
+    ]
+
+    first_base = closest_cell(corners[0])
+    base_orbit = next(orbit for orbit in orbits if first_base in orbit)
+    base_orbit = base_orbit[base_orbit.index(first_base):] + base_orbit[:base_orbit.index(first_base)]
+    for team, cell_id in zip(TEAMS[:num_players], base_orbit):
+        cells[cell_id].update(owner=team, isSpawn=True, spawnActive=True, isBase=True, originalTeam=team)
+
+    # Orbits with fewer cells than players are at the center.
+    full_orbits = [orbit for orbit in orbits if len(orbit) == num_players and orbit is not base_orbit]
+    for orbit in random.sample(full_orbits, int(len(full_orbits) * SPAWN_SHARE)):
+        for cell_id in orbit:
+            cells[cell_id]["isSpawn"] = True
+    center_cells = [orbit[0] for orbit in orbits if len(orbit) == 1]
+    if center_cells and random.random() < 0.5:  # 50% chance to add a center spawn
+        cells[center_cells[0]]["isSpawn"] = True
+
+    return cells, [[[round(x, 4), round(y, 4)] for x, y in shape] for shape in shapes]
+
+def create_game(num_players):
+    board, shapes = create_board_state(num_players)
+    return {
+        "numPlayers": num_players,
+        "teams": TEAMS[:num_players],
+        "layout": {"cells": shapes},  # Static, so only sent when a player joins.
+        "board": board,
+        "players": {},
+        "moves": []
+    }
+
+def without_layout(game):
+    """Game state for the frequent updates: everything except the static cell shapes."""
+    return {key: value for key, value in game.items() if key != "layout"}
+
+def get_or_create_game(game_key, num_players=DEFAULT_PLAYERS):
+    """Return the game; a new game uses num_players, an existing one keeps its own count."""
+    if game_key not in games:
+        num_players = clamp_players(num_players)
+        games[game_key] = create_game(num_players)
+        print(f"Created new {num_players}-player game: {game_key}")
+    return games[game_key]
 
 @app.route('/')
 def home():
@@ -164,11 +249,11 @@ def home():
         <h1>Welcome to the Multiplayer Strategy Game!</h1>
         <p><strong>Game Rules:</strong></p>
         <ul>
-          <li>The board is 16x16 with four corner spawns.</li>
+          <li>Choose 2 to 6 players. The board is a polygon grid with one base per player in its corners: squares for 2 and 4 players, triangles for 3, a pentagon of quadrilaterals for 5, hexagons for 6.</li>
           <li>Extra (grey) spawns generate troops only after they are conquered.</li>
           <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
           <li>If you conquer a cell, it changes to your team's color.</li>
-          <li>If you conquer your enemy's initial spawn (a corner cell), then all cells owned by that enemy become yours.</li>
+          <li>If you conquer your enemy's base, then all cells owned by that enemy become yours.</li>
           <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
         </ul>
         
@@ -177,12 +262,12 @@ def home():
           <p>These settings help ensure all players have a fair chance:</p>
           <table class="settings-table">
             <tr>
-              <td><strong>Perfect Mirror Symmetry</strong></td>
-              <td>Spawn points are randomly generated in one quarter of the board and then mirrored to all other quarters, ensuring perfect symmetry and fairness for all teams.</td>
+              <td><strong>Perfect Rotational Symmetry</strong></td>
+              <td>Spawn points are randomly generated in one player's part of the board and then rotated to all other parts, ensuring perfect symmetry and fairness for all teams.</td>
             </tr>
             <tr>
               <td><strong>Random Board Layout</strong></td>
-              <td>Each game has a unique board layout while maintaining perfect symmetry between all four quadrants.</td>
+              <td>Each game has a unique board layout while maintaining perfect symmetry between all players.</td>
             </tr>
           </table>
         </div>
@@ -201,29 +286,22 @@ def home():
 
 @app.route('/<game_key>')
 def game(game_key):
-    if game_key not in games:
-        games[game_key] = {
-            "board": create_board_state(),
-            "players": {},
-            "moves": []
-        }
-        print(f"Created new game: {game_key}")
-    else:
-        print(f"Reusing game: {game_key}")
+    get_or_create_game(game_key, request.args.get('players', DEFAULT_PLAYERS))
     return f"Game '{game_key}' is ready. Please load the client at http://localhost:5002/{game_key}."
+
+@socketio.on('game_info')
+def handle_game_info(data):
+    """Return the player count and teams of a game, or of the game that join_game would create."""
+    game = games.get(data.get('game_key'))
+    num_players = game["numPlayers"] if game else clamp_players(data.get('players', DEFAULT_PLAYERS))
+    return {"numPlayers": num_players, "teams": TEAMS[:num_players]}
 
 @socketio.on('join_game')
 def handle_join_game(data):
     game_key = data.get('game_key')
     player_name = data.get('player_name', 'Anonymous')
     player_team = data.get('team', 'neutral')  # New: player's chosen team
-    if game_key not in games:
-        games[game_key] = {
-            "board": create_board_state(),
-            "players": {},
-            "moves": []
-        }
-        print(f"Created new game: {game_key}")
+    get_or_create_game(game_key, data.get('players', DEFAULT_PLAYERS))
     # Save player's name and team.
     games[game_key]["players"][request.sid] = { "name": player_name, "team": player_team }
     join_room(game_key)
@@ -267,28 +345,27 @@ def handle_move(data):
         print(f"Move rejected: player's team ({player.get('team')}) does not match move team ({move.get('team')}).")
         return
 
-    from_row = move['from']['row']
-    from_col = move['from']['col']
-    to_row = move['to']['row']
-    to_col = move['to']['col']
+    from_id = move.get('from')
+    to_id = move.get('to')
+    if not all(isinstance(cell_id, int) and 0 <= cell_id < len(board) for cell_id in (from_id, to_id)):
+        print(f"Move rejected: invalid cell ids. From: {from_id} To: {to_id}")
+        return
     attacking_troops = move["troops"]
     attacking_team = move["team"]
 
-    from_cell = board[from_row][from_col]
-    to_cell = board[to_row][to_col]
-    
+    from_cell = board[from_id]
+    to_cell = board[to_id]
+
     # Prevent moves from or to white cells (non-spawn cells without an owner)
     if (from_cell["owner"] is None and not from_cell["isSpawn"]) or (to_cell["owner"] is None and not to_cell["isSpawn"]):
-        print(f"Move rejected: can't move from/to white cell. From: {from_row},{from_col} To: {to_row},{to_col}")
+        print(f"Move rejected: can't move from/to white cell. From: {from_id} To: {to_id}")
         return
 
     # Remove troops from the source cell immediately.
     from_cell["troops"] = 0
 
     # Calculate Euclidean distance and duration.
-    dx = to_col - from_col
-    dy = to_row - from_row
-    distance = math.sqrt(dx*dx + dy*dy)
+    distance = math.hypot(to_cell["x"] - from_cell["x"], to_cell["y"] - from_cell["y"])
     duration = distance * 1000  # 1 second per cell
 
     # Generate a unique move ID.
@@ -301,8 +378,11 @@ def handle_move(data):
 
     def process_move():
         eventlet.sleep(duration / 1000.0)
+        # Drop the move if the game was finished (or finished and created again) meanwhile
+        if games.get(game_key) is not game:
+            return
         # Don't process the move if the game is paused
-        if games[game_key].get('isPaused', False):
+        if game.get('isPaused', False):
             eventlet.sleep(0.1)  # Sleep briefly and check again
             return process_move()  # Recursively check until unpaused
             
@@ -323,13 +403,12 @@ def handle_move(data):
                 to_cell["troops"] = remaining
                 if to_cell["isSpawn"] and not to_cell["spawnActive"]:
                     to_cell["spawnActive"] = True
-                if to_cell["isCorner"] and to_cell["originalTeam"] == defeated_team:
-                    for row in board:
-                        for cell in row:
-                            if cell.get("owner") == defeated_team:
-                                cell["owner"] = attacking_team
-                                if cell["isSpawn"]:
-                                    cell["spawnActive"] = True
+                if to_cell["isBase"] and to_cell["originalTeam"] == defeated_team:
+                    for cell in board:
+                        if cell.get("owner") == defeated_team:
+                            cell["owner"] = attacking_team
+                            if cell["isSpawn"]:
+                                cell["spawnActive"] = True
             elif attacking_troops < defending_troops:
                 to_cell["troops"] = defending_troops - attacking_troops
             else:
@@ -339,7 +418,7 @@ def handle_move(data):
 
         game["moves"].append(move)
         # Emit end_move event with move_id and updated game state.
-        socketio.emit('end_move', {"move_id": move_id, "state": game}, room=game_key)
+        socketio.emit('end_move', {"move_id": move_id, "state": without_layout(game)}, room=game_key)
         print(f"Emitted end_move for game {game_key} with move_id {move_id}.")
     eventlet.spawn(process_move)
 
@@ -348,12 +427,10 @@ def generate_troops():
     while True:
         for game_key, game in list(games.items()):  # Use list() to avoid RuntimeError from dict changing size during iteration
             if not game.get('isPaused', False):  # Only generate troops if game is not paused
-                board = game["board"]
-                for row in board:
-                    for cell in row:
-                        if cell["isSpawn"] and cell["spawnActive"]:
-                            cell["troops"] += 1
-                socketio.emit('game_state', game, room=game_key)
+                for cell in game["board"]:
+                    if cell["isSpawn"] and cell["spawnActive"]:
+                        cell["troops"] += 1
+                socketio.emit('game_state', without_layout(game), room=game_key)
                 print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
 

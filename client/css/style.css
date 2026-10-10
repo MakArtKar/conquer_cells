@@ -46,76 +46,123 @@ body {
   color: #004999;
 }
 
-/* Board container wrapping board, overlay, and leaderboard */
+/* Player count picker on the welcome page */
+.player-count {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.player-count button {
+  font-size: 1.3em;
+  width: 50px;
+  height: 50px;
+  border: 2px solid #0066cc;
+  border-radius: 8px;
+  background: #fff;
+  color: #0066cc;
+  cursor: pointer;
+}
+
+.player-count button.selected {
+  background: #0066cc;
+  color: #fff;
+}
+
+/* Board container wrapping board and overlay; main.js sets its size to fit the board */
 #board-container {
   position: relative;
-  width: calc(16 * 80px + 15 * 1px);
-  height: calc(16 * 80px + 15 * 1px);
   margin: 20px auto;
 }
 
 /* Game board styling */
 #game-board {
-  display: grid;
-  grid-template-columns: repeat(16, 80px);
-  grid-template-rows: repeat(16, 80px);
-  gap: 1px;
   width: 100%;
   height: 100%;
-  background-color: #333;
   position: relative;
   z-index: 1;
 }
 
-/* Individual cell styling */
+/* Board SVG: the board polygon, then the cells on top of it */
+.board-shape {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.board-outline {
+  fill: #333;
+}
+
+/* Individual cell styling: an SVG group with the cell polygon and the troop count */
 .cell {
-  border: 1px solid red;
-  width: 80px;
-  height: 80px;
-  background-color: #eee;
-  text-align: center;
-  line-height: 80px;
-  font-size: 18px;
   cursor: pointer;
+}
+
+.cell polygon {
+  fill: #eee;
+  stroke: #333;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.cell text {
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
   user-select: none;
 }
 
 /* Style for white cells (non-spawn cells with no owner) */
-.cell:not(.spawn):not(.red):not(.blue):not(.green):not(.yellow) {
+.cell.empty {
   cursor: not-allowed;
-  filter: brightness(0.95);
-  border: 1px dashed #ccc;
 }
 
-.cell.red {
-  background-color: #ffaaaa;
+.cell.empty polygon {
+  fill: #e2e2e2;
 }
 
-.cell.blue {
-  background-color: #aaaaff;
+.cell.red polygon {
+  fill: #ffaaaa;
 }
 
-.cell.green {
-  background-color: #aaffaa;
+.cell.blue polygon {
+  fill: #aaaaff;
 }
 
-.cell.yellow {
-  background-color: #ffc935;
+.cell.green polygon {
+  fill: #aaffaa;
 }
 
-.cell.neutral {
-  background-color: #eee;
+.cell.yellow polygon {
+  fill: #ffc935;
+}
+
+.cell.purple polygon {
+  fill: #d9b3ff;
+}
+
+.cell.cyan polygon {
+  fill: #a0eeee;
+}
+
+.cell.neutral polygon {
+  fill: #eee;
 }
 
 /* Spawn styling */
-.spawn {
-  border: 2px solid black;
-  filter: brightness(0.85);
+.cell.spawn polygon {
+  stroke: #000;
+  stroke-width: 2;
 }
 
-.inactive-spawn {
-  background-color: #555;
-  filter: none;
+.cell.inactive-spawn polygon {
+  fill: #555;
+}
+
+/* A player's base: losing it gives all the player's cells to the attacker */
+.cell.base polygon {
+  stroke-width: 4;
 }
 
 /* Overlay canvas positioned relative to board-container */
@@ -129,7 +176,7 @@ body {
 
 /* Game controls */
 .game-controls {
-  max-width: calc(16 * 80px + 15 * 1px);
+  max-width: 1100px;
   margin: 20px auto;
   text-align: center;
   display: flex;
@@ -238,6 +285,14 @@ body {
   background-color: rgba(255, 201, 53, 0.1);
 }
 
+.purple-row {
+  background-color: rgba(155, 48, 255, 0.1);
+}
+
+.cyan-row {
+  background-color: rgba(0, 160, 160, 0.1);
+}
+
 /* Current player's team highlighting */
 tr.current-player-team {
   position: relative;
@@ -261,33 +316,35 @@ tr.yellow-row.current-player-team {
   background-color: rgba(255, 201, 53, 0.2);
 }
 
-/* Cell hover effect */
-.cell:hover {
-  filter: brightness(0.9);
+tr.purple-row.current-player-team {
+  background-color: rgba(155, 48, 255, 0.2);
 }
 
-/* Selected cell animation with DRAMATICALLY increased visibility */
+tr.cyan-row.current-player-team {
+  background-color: rgba(0, 160, 160, 0.2);
+}
+
+/* Cell hover effect */
+.cell:hover polygon {
+  fill-opacity: 0.85;
+}
+
+/* Selected cell: enlarged, with a pulsing outline and glow */
 .cell.selected {
-  outline: 8px solid #ffc935;
-  box-shadow: 0 0 20px 5px #ffc935, inset 0 0 10px #ffc935;
-  position: relative;
-  z-index: 5;
-  border: 2px solid #000;
-  transform: scale(1.05);
+  transform: scale(1.1);
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 6px #ffc935);
+}
+
+.cell.selected polygon {
+  stroke: #ffc935;
+  stroke-width: 5;
   animation: pulse 1s infinite;
 }
 
 @keyframes pulse {
-  0% { 
-    outline-color: rgba(255, 201, 53, 1);
-    box-shadow: 0 0 20px 5px rgba(255, 201, 53, 1), inset 0 0 10px rgba(255, 201, 53, 1);
-  }
-  50% { 
-    outline-color: rgba(255, 201, 53, 0.5);
-    box-shadow: 0 0 10px rgba(255, 201, 53, 0.5), inset 0 0 5px rgba(255, 201, 53, 0.5);
-  }
-  100% { 
-    outline-color: rgba(255, 201, 53, 1);
-    box-shadow: 0 0 20px 5px rgba(255, 201, 53, 1), inset 0 0 10px rgba(255, 201, 53, 1);
-  }
+  0% { stroke: rgba(255, 201, 53, 1); }
+  50% { stroke: rgba(255, 201, 53, 0.5); }
+  100% { stroke: rgba(255, 201, 53, 1); }
 }
