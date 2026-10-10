@@ -29,16 +29,57 @@ def clamp_players(num_players):
         return DEFAULT_PLAYERS
     return min(max(num_players, MIN_PLAYERS), MAX_PLAYERS)
 
+def cell_distance(a, b):
+    return math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+
 class DummyBot:
     """Does nothing: its color keeps its base and the troops there."""
     label = "Dummy"
 
     def moves(self, game, team):
-        """Return the moves to start this second, as (from cell id, to cell id) pairs."""
+        """Return the moves to start this second, as (from cell id, to cell id) pairs. Like a
+        player's click, a move sends all troops of the cell."""
         return []
 
-# Bots by kind. A color without human players is played by the bot chosen for it in the lobby.
-BOTS = {"dummy": DummyBot()}
+class PeaceBot:
+    """Takes free cells and never attacks. Every TURN_SECONDS it starts one move, without
+    waiting for earlier moves to arrive: its fullest cell with more than SEND_HOME_ABOVE troops
+    sends them to its base; if no cell has that many, its cell nearest to a free cell takes it.
+    The base only takes free cells while no other cell has troops (at the start)."""
+    label = "Peace"
+    TURN_SECONDS = 1
+    SEND_HOME_ABOVE = 25  # Fewer, bigger moves to the base: less clutter on the board.
+
+    def __init__(self):
+        self.second = 0  # moves() is called once per second of play
+        self.arrivals = {}  # Free cell id -> second when our troops reach it
+
+    def moves(self, game, team):
+        self.second += 1
+        if self.second % self.TURN_SECONDS:
+            return []
+        board = game["board"]
+        base = next((c for c in board if c["isBase"] and c["originalTeam"] == team and c["owner"] == team), None)
+        if base is None:
+            return []  # The base is lost, and all cells with it.
+
+        others = [c for c in board if c["owner"] == team and c is not base and c["troops"] > 0]
+        crowded = [c for c in others if c["troops"] > self.SEND_HOME_ABOVE]
+        if crowded:
+            return [(max(crowded, key=lambda c: c["troops"])["id"], base["id"])]
+
+        self.arrivals = {cell_id: second for cell_id, second in self.arrivals.items() if second >= self.second}
+        free = [c for c in board if c["owner"] is None and c["isSpawn"] and c["id"] not in self.arrivals]
+        sources = others or ([base] if base["troops"] > 0 else [])
+        if not sources or not free:
+            return []
+        source, target = min(((o, f) for o in sources for f in free), key=lambda pair: cell_distance(*pair))
+        self.arrivals[target["id"]] = self.second + math.ceil(cell_distance(source, target))
+        return [(source["id"], target["id"])]
+
+# Bot classes by kind. A color without human players is played by the bot chosen for it in the
+# lobby; each game creates its own bot objects, so bots can keep state between seconds.
+BOTS = {"dummy": DummyBot, "peace": PeaceBot}
 DEFAULT_BOT = "dummy"
 BOT_OPTIONS = [{"kind": kind, "label": bot.label} for kind, bot in BOTS.items()]
 
@@ -214,7 +255,7 @@ def new_map(game, num_players):
 
 def create_game(num_players):
     # A game starts in the lobby: players join and choose colors, then someone starts it.
-    game = {"status": "lobby", "players": {}, "moves": []}
+    game = {"status": "lobby", "players": {}}
     new_map(game, num_players)
     return game
 
@@ -436,14 +477,14 @@ def handle_move(data):
     launch_move(game_key, game, move)
 
 def launch_move(game_key, game, move):
-    """Start a move of a player or a bot: move has from and to (cell ids), troops, and team."""
+    """Start a move of a player or a bot: move has from and to (cell ids) and team. A move sends
+    all troops of the cell, as counted by the server (the client's count can be a second old)."""
     board = game["board"]
     from_id = move.get('from')
     to_id = move.get('to')
     if not all(isinstance(cell_id, int) and 0 <= cell_id < len(board) for cell_id in (from_id, to_id)):
         print(f"Move rejected: invalid cell ids. From: {from_id} To: {to_id}")
         return
-    attacking_troops = move["troops"]
     attacking_team = move["team"]
 
     from_cell = board[from_id]
@@ -456,20 +497,25 @@ def launch_move(game_key, game, move):
     if from_cell["owner"] != attacking_team:
         print(f"Move rejected: cell {from_id} does not belong to {attacking_team}.")
         return
+    attacking_troops = from_cell["troops"]
+    if attacking_troops < 1:
+        print(f"Move rejected: no troops to send from cell {from_id}.")
+        return
+    move["troops"] = attacking_troops
 
     # Remove troops from the source cell immediately.
     from_cell["troops"] = 0
 
     # Calculate Euclidean distance and duration.
-    distance = math.hypot(to_cell["x"] - from_cell["x"], to_cell["y"] - from_cell["y"])
+    distance = cell_distance(from_cell, to_cell)
     duration = distance * 1000  # 1 second per cell
 
     # Generate a unique move ID.
     move_id = str(uuid.uuid4())
     move["id"] = move_id
 
-    # Emit a start_move event with move data and duration.
-    socketio.emit('start_move', {"move": move, "duration": duration}, room=game_key)
+    # Emit a start_move event with move data, duration, and the source cell with fewer troops.
+    socketio.emit('start_move', {"move": move, "duration": duration, "cells": [from_cell]}, room=game_key)
     print(f"Emitted start_move for game {game_key} with move_id {move_id} and duration {duration} ms.")
 
     def process_move():
@@ -483,6 +529,7 @@ def launch_move(game_key, game, move):
             return process_move()  # Recursively check until unpaused
             
         # Process the move.
+        changed = [to_cell]  # Cells to send with end_move; the whole board goes out every second.
         if to_cell["owner"] is None:
             to_cell["owner"] = attacking_team
             to_cell["troops"] = attacking_troops
@@ -505,6 +552,7 @@ def launch_move(game_key, game, move):
                             cell["owner"] = attacking_team
                             if cell["isSpawn"]:
                                 cell["spawnActive"] = True
+                            changed.append(cell)
             elif attacking_troops < defending_troops:
                 to_cell["troops"] = defending_troops - attacking_troops
             else:
@@ -512,9 +560,8 @@ def launch_move(game_key, game, move):
                 to_cell["owner"] = None
                 to_cell["spawnActive"] = False
 
-        game["moves"].append(move)
-        # Emit end_move event with move_id and updated game state.
-        socketio.emit('end_move', {"move_id": move_id, "state": without_layout(game)}, room=game_key)
+        # Emit end_move event with move_id and the changed cells.
+        socketio.emit('end_move', {"move_id": move_id, "cells": changed}, room=game_key)
         print(f"Emitted end_move for game {game_key} with move_id {move_id}.")
     eventlet.spawn(process_move)
 
@@ -531,14 +578,21 @@ def generate_troops():
                 print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
 
+bot_players = {}  # Game key -> (game, {team: bot object}); the game check drops bots of an old game.
+
 def run_bots(game_key, game):
     """Let the bot of every color without human players start its moves for this second."""
+    if game_key not in bot_players or bot_players[game_key][0] is not game:
+        bot_players[game_key] = (game, {})
+    bots = bot_players[game_key][1]
     human_teams = {player["team"] for player in game["players"].values()}
     for team in game["teams"]:
-        if team not in human_teams:
-            for from_id, to_id in BOTS[game["bots"][team]].moves(game, team):
-                troops = game["board"][from_id]["troops"]
-                launch_move(game_key, game, {"game_key": game_key, "from": from_id, "to": to_id, "troops": troops, "team": team})
+        if team in human_teams:
+            continue
+        if team not in bots:
+            bots[team] = BOTS[game["bots"][team]]()
+        for from_id, to_id in bots[team].moves(game, team):
+            launch_move(game_key, game, {"game_key": game_key, "from": from_id, "to": to_id, "team": team})
 
 @socketio.on('finish_game')
 def handle_finish_game(data):
@@ -549,6 +603,7 @@ def handle_finish_game(data):
 
     # Delete the game state
     del games[game_key]
+    bot_players.pop(game_key, None)
     print(f"Game {game_key} finished and cleaned up")
     
     # Notify all clients in the room that the game is finished

@@ -313,6 +313,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   socket.on('start_move', (data) => {
     if (!gameState) return; // Don't process events if game is finished
+    applyCellUpdates(data.cells);
     if (data && data.move && data.duration) {
       addMoveAnimation(data.move, data.duration);
       updateLeaderboard();
@@ -321,11 +322,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   socket.on('end_move', (data) => {
     if (!gameState) return; // Don't process events if game is finished
-    if (data && data.state) {
-      gameState = data.state;
-      boardState = data.state.board;
-      updateBoard(boardState);
-    }
+    applyCellUpdates(data.cells);
     clearOverlay();
     if (data.move_id) {
       removeMoveAnimation(data.move_id);
@@ -558,6 +555,15 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     // No drawActiveMoveVectors() here: renderBoard started its animation loop already,
     // and every extra call would start one more loop.
     updateLeaderboard();
+  }
+
+  // Apply the cells that a move changed; the whole board comes with game_state every second.
+  function applyCellUpdates(cells) {
+    if (!cells || boardCells.length === 0) return;
+    cells.forEach(cell => {
+      boardState[cell.id] = cell;
+      applyCellState(boardCells[cell.id], cell);
+    });
   }
 
   function onCellClick() {
