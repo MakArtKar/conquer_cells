@@ -6,7 +6,7 @@ import eventlet
 eventlet.monkey_patch()
 
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, join_room
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
@@ -184,16 +184,24 @@ def create_board_state(num_players):
 
     return cells, [[[round(x, 4), round(y, 4)] for x, y in shape] for shape in shapes]
 
-def create_game(num_players):
+def new_map(game, num_players):
+    """Give the game a new board for num_players; players keep their colors if the board has them."""
     board, shapes = create_board_state(num_players)
-    return {
-        "numPlayers": num_players,
-        "teams": TEAMS[:num_players],
-        "layout": {"cells": shapes},  # Static, so only sent when a player joins.
-        "board": board,
-        "players": {},
-        "moves": []
-    }
+    game.update(
+        numPlayers=num_players,
+        teams=TEAMS[:num_players],
+        layout={"cells": shapes},  # Static during play, so the per-second updates leave it out.
+        board=board,
+    )
+    for player in game["players"].values():
+        if player["team"] not in game["teams"]:
+            player["team"] = None
+
+def create_game(num_players):
+    # A game starts in the lobby: players join and choose colors, then someone starts it.
+    game = {"status": "lobby", "players": {}, "moves": []}
+    new_map(game, num_players)
+    return game
 
 def without_layout(game):
     """Game state for the frequent updates: everything except the static cell shapes."""
@@ -249,12 +257,12 @@ def home():
         <h1>Welcome to the Multiplayer Strategy Game!</h1>
         <p><strong>Game Rules:</strong></p>
         <ul>
-          <li>Choose 2 to 6 players. The board is a polygon grid with one base per player in its corners: squares for 2 and 4 players, triangles for 3, a pentagon of quadrilaterals for 5, hexagons for 6.</li>
+          <li>Choose 2 to 6 players in the lobby. The board is a polygon grid with one base per player in its corners: squares for 2 and 4 players, triangles for 3, a pentagon of quadrilaterals for 5, hexagons for 6.</li>
           <li>Extra (grey) spawns generate troops only after they are conquered.</li>
           <li>Click a cell with troops to select it, then click on a destination cell to move your troops.</li>
           <li>If you conquer a cell, it changes to your team's color.</li>
           <li>If you conquer your enemy's base, then all cells owned by that enemy become yours.</li>
-          <li>All players must join using the same game link. Each player should choose a personal color and use only that color.</li>
+          <li>All players join with the same game code. In the lobby everyone chooses a color, then anyone can start the game.</li>
         </ul>
         
         <div class="settings-section">
@@ -289,24 +297,81 @@ def game(game_key):
     get_or_create_game(game_key, request.args.get('players', DEFAULT_PLAYERS))
     return f"Game '{game_key}' is ready. Please load the client at http://localhost:5002/{game_key}."
 
-@socketio.on('game_info')
-def handle_game_info(data):
-    """Return the player count and teams of a game, or of the game that join_game would create."""
-    game = games.get(data.get('game_key'))
-    num_players = game["numPlayers"] if game else clamp_players(data.get('players', DEFAULT_PLAYERS))
-    return {"numPlayers": num_players, "teams": TEAMS[:num_players]}
+MAX_NAME_LENGTH = 20
 
-@socketio.on('join_game')
-def handle_join_game(data):
+def clean_name(name):
+    name = str(name or "").strip()[:MAX_NAME_LENGTH].strip()
+    return name or "Anonymous"
+
+def broadcast_lobby(game_key):
+    """Send the whole game, with the board shapes, to everybody in it; clients in the lobby show it."""
+    socketio.emit('lobby_state', games[game_key], room=game_key)
+
+def lobby_sender(data):
+    """Return (game key, game, player) for the sender of an event, or (None, None, None)."""
     game_key = data.get('game_key')
-    player_name = data.get('player_name', 'Anonymous')
-    player_team = data.get('team', 'neutral')  # New: player's chosen team
-    get_or_create_game(game_key, data.get('players', DEFAULT_PLAYERS))
-    # Save player's name and team.
-    games[game_key]["players"][request.sid] = { "name": player_name, "team": player_team }
+    game = games.get(game_key)
+    player = game["players"].get(request.sid) if game else None
+    return (game_key, game, player) if player else (None, None, None)
+
+@socketio.on('join_lobby')
+def handle_join_lobby(data):
+    """Add the sender to the game's lobby; a new game uses the requested player count."""
+    game_key = data.get('game_key')
+    if not isinstance(game_key, str) or not game_key:
+        return
+    game = get_or_create_game(game_key, data.get('players', DEFAULT_PLAYERS))
+    # A client that reconnects sends its color again.
+    team = data.get('team') if data.get('team') in game["teams"] else None
+    game["players"][request.sid] = {"name": clean_name(data.get('player_name')), "team": team}
     join_room(game_key)
-    emit('game_state', games[game_key], room=request.sid)
-    print(f"Player {player_name} (team: {player_team}) joined game {game_key} (sid: {request.sid})")
+    broadcast_lobby(game_key)
+    print(f"Player {game['players'][request.sid]['name']} joined game {game_key} (sid: {request.sid})")
+
+@socketio.on('set_name')
+def handle_set_name(data):
+    game_key, game, player = lobby_sender(data)
+    if player:
+        player["name"] = clean_name(data.get('player_name'))
+        broadcast_lobby(game_key)
+
+@socketio.on('choose_team')
+def handle_choose_team(data):
+    """Set the sender's color; None leaves the color. Also works for players who join a running game."""
+    game_key, game, player = lobby_sender(data)
+    team = data.get('team')
+    if player and (team is None or team in game["teams"]):
+        player["team"] = team
+        broadcast_lobby(game_key)
+
+@socketio.on('set_player_count')
+def handle_set_player_count(data):
+    game_key, game, player = lobby_sender(data)
+    if player and game["status"] == "lobby":
+        new_map(game, clamp_players(data.get('players')))
+        broadcast_lobby(game_key)
+
+@socketio.on('regenerate_map')
+def handle_regenerate_map(data):
+    """New spawn positions for the same player count; the colors stay."""
+    game_key, game, player = lobby_sender(data)
+    if player and game["status"] == "lobby":
+        new_map(game, game["numPlayers"])
+        broadcast_lobby(game_key)
+
+@socketio.on('start_game')
+def handle_start_game(data):
+    game_key, game, player = lobby_sender(data)
+    if player and game["status"] == "lobby" and any(p["team"] for p in game["players"].values()):
+        game["status"] = "playing"
+        broadcast_lobby(game_key)
+        print(f"Game {game_key} started")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    for game_key, game in list(games.items()):
+        if game["players"].pop(request.sid, None) is not None:
+            broadcast_lobby(game_key)
 
 @socketio.on('toggle_pause')
 def handle_toggle_pause(data):
@@ -328,7 +393,7 @@ def handle_move(data):
         return
 
     game = games[game_key]
-    if game.get('isPaused', False):  # Don't process moves if game is paused
+    if game["status"] != "playing" or game.get('isPaused', False):  # Only moves in a running game
         return
 
     move = data
@@ -426,7 +491,7 @@ def generate_troops():
     """Background thread that updates troop counts and sends updates each second."""
     while True:
         for game_key, game in list(games.items()):  # Use list() to avoid RuntimeError from dict changing size during iteration
-            if not game.get('isPaused', False):  # Only generate troops if game is not paused
+            if game["status"] == "playing" and not game.get('isPaused', False):  # Only in a running game
                 for cell in game["board"]:
                     if cell["isSpawn"] and cell["spawnActive"]:
                         cell["troops"] += 1
