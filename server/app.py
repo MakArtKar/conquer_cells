@@ -29,6 +29,19 @@ def clamp_players(num_players):
         return DEFAULT_PLAYERS
     return min(max(num_players, MIN_PLAYERS), MAX_PLAYERS)
 
+class DummyBot:
+    """Does nothing: its color keeps its base and the troops there."""
+    label = "Dummy"
+
+    def moves(self, game, team):
+        """Return the moves to start this second, as (from cell id, to cell id) pairs."""
+        return []
+
+# Bots by kind. A color without human players is played by the bot chosen for it in the lobby.
+BOTS = {"dummy": DummyBot()}
+DEFAULT_BOT = "dummy"
+BOT_OPTIONS = [{"kind": kind, "label": bot.label} for kind, bot in BOTS.items()]
+
 # Grid sizes, chosen for about 50-60 cells per player.
 SQUARE_SIZE = {2: 11, 4: 15}  # Cells per side.
 TRIANGLE_SIZE = 13            # Cells per side.
@@ -196,6 +209,8 @@ def new_map(game, num_players):
     for player in game["players"].values():
         if player["team"] not in game["teams"]:
             player["team"] = None
+    old_bots = game.get("bots", {})
+    game["bots"] = {team: old_bots.get(team, DEFAULT_BOT) for team in game["teams"]}
 
 def create_game(num_players):
     # A game starts in the lobby: players join and choose colors, then someone starts it.
@@ -305,7 +320,7 @@ def clean_name(name):
 
 def broadcast_lobby(game_key):
     """Send the whole game, with the board shapes, to everybody in it; clients in the lobby show it."""
-    socketio.emit('lobby_state', games[game_key], room=game_key)
+    socketio.emit('lobby_state', dict(games[game_key], botOptions=BOT_OPTIONS), room=game_key)
 
 def lobby_sender(data):
     """Return (game key, game, player) for the sender of an event, or (None, None, None)."""
@@ -342,6 +357,15 @@ def handle_choose_team(data):
     team = data.get('team')
     if player and (team is None or team in game["teams"]):
         player["team"] = team
+        broadcast_lobby(game_key)
+
+@socketio.on('set_bot')
+def handle_set_bot(data):
+    """Choose the bot that plays a color while the color has no human players."""
+    game_key, game, player = lobby_sender(data)
+    team, bot = data.get('team'), data.get('bot')
+    if player and game["status"] == "lobby" and team in game["teams"] and bot in BOTS:
+        game["bots"][team] = bot
         broadcast_lobby(game_key)
 
 @socketio.on('set_player_count')
@@ -397,7 +421,6 @@ def handle_move(data):
         return
 
     move = data
-    board = game["board"]
 
     # Retrieve the player's information.
     player = game["players"].get(request.sid)
@@ -410,6 +433,11 @@ def handle_move(data):
         print(f"Move rejected: player's team ({player.get('team')}) does not match move team ({move.get('team')}).")
         return
 
+    launch_move(game_key, game, move)
+
+def launch_move(game_key, game, move):
+    """Start a move of a player or a bot: move has from and to (cell ids), troops, and team."""
+    board = game["board"]
     from_id = move.get('from')
     to_id = move.get('to')
     if not all(isinstance(cell_id, int) and 0 <= cell_id < len(board) for cell_id in (from_id, to_id)):
@@ -424,6 +452,9 @@ def handle_move(data):
     # Prevent moves from or to white cells (non-spawn cells without an owner)
     if (from_cell["owner"] is None and not from_cell["isSpawn"]) or (to_cell["owner"] is None and not to_cell["isSpawn"]):
         print(f"Move rejected: can't move from/to white cell. From: {from_id} To: {to_id}")
+        return
+    if from_cell["owner"] != attacking_team:
+        print(f"Move rejected: cell {from_id} does not belong to {attacking_team}.")
         return
 
     # Remove troops from the source cell immediately.
@@ -495,9 +526,19 @@ def generate_troops():
                 for cell in game["board"]:
                     if cell["isSpawn"] and cell["spawnActive"]:
                         cell["troops"] += 1
+                run_bots(game_key, game)
                 socketio.emit('game_state', without_layout(game), room=game_key)
                 print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
+
+def run_bots(game_key, game):
+    """Let the bot of every color without human players start its moves for this second."""
+    human_teams = {player["team"] for player in game["players"].values()}
+    for team in game["teams"]:
+        if team not in human_teams:
+            for from_id, to_id in BOTS[game["bots"][team]].moves(game, team):
+                troops = game["board"][from_id]["troops"]
+                launch_move(game_key, game, {"game_key": game_key, "from": from_id, "to": to_id, "troops": troops, "team": team})
 
 @socketio.on('finish_game')
 def handle_finish_game(data):

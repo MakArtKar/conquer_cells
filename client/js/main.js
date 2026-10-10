@@ -35,6 +35,7 @@ let currentPlayer = null;  // Store current player info
 let isPaused = false;  // Track pause state
 let pauseStartTime = null;  // Track when pause started
 let totalPauseDuration = 0;  // Track cumulative pause duration
+let botLabels = {};  // Bot kind -> label, from the server's lobby_state
 
 document.addEventListener('DOMContentLoaded', () => {
   const appDiv = document.getElementById("app");
@@ -270,6 +271,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   socket.on('lobby_state', (state) => {
     lobbyState = state;
+    botLabels = Object.fromEntries(state.botOptions.map(option => [option.kind, option.label]));
     if (view !== 'lobby') return;
     const me = state.players[socket.id];
     myTeam = me ? me.team : null;
@@ -359,11 +361,17 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     }
 
     // Clicking your own color again leaves it.
-    document.getElementById('team-slots').addEventListener('click', (event) => {
+    const teamSlots = document.getElementById('team-slots');
+    teamSlots.addEventListener('click', (event) => {
       const slot = event.target.closest('.team-slot');
       if (slot) {
         const team = slot.dataset.team === myTeam ? null : slot.dataset.team;
         socket.emit('choose_team', { game_key: gameKey, team: team });
+      }
+    });
+    teamSlots.addEventListener('change', (event) => {
+      if (event.target.classList.contains('bot-select')) {
+        socket.emit('set_bot', { game_key: gameKey, team: event.target.dataset.team, bot: event.target.value });
       }
     });
 
@@ -396,14 +404,25 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     });
 
     document.getElementById('players-heading').textContent = `Players (${players.length})`;
+    // A color without players is played by its bot; the bot can be changed until the start.
     document.getElementById('team-slots').innerHTML = state.teams.map(team => {
       const members = players.filter(player => player.team === team);
+      const botSelect = `
+        <select class="bot-select" data-team="${team}" title="Bot for a free color"${playing ? ' disabled' : ''}>
+          ${state.botOptions.map(option => `
+            <option value="${option.kind}"${option.kind === state.bots[team] ? ' selected' : ''}>🤖 ${escapeHtml(option.label)}</option>
+          `).join('')}
+        </select>
+      `;
       return `
-        <button class="team-slot ${team}-row${team === myTeam ? ' current-player-team' : ''}" data-team="${team}">
-          <span class="team-swatch" style="background: ${TEAM_STYLES[team].fill};"></span>
-          <span class="team-label">${TEAM_STYLES[team].label}</span>
-          <span class="team-members">${members.length > 0 ? members.map(nameHtml).join(', ') : 'free'}</span>
-        </button>
+        <div class="team-row ${team}-row${team === myTeam ? ' current-player-team' : ''}">
+          <button class="team-slot" data-team="${team}">
+            <span class="team-swatch" style="background: ${TEAM_STYLES[team].fill};"></span>
+            <span class="team-label">${TEAM_STYLES[team].label}</span>
+            <span class="team-members">${members.length > 0 ? members.map(nameHtml).join(', ') : 'free'}</span>
+          </button>
+          ${members.length > 0 ? '' : botSelect}
+        </div>
       `;
     }).join('');
     const unassigned = players.filter(player => !player.team);
@@ -686,6 +705,12 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     ctx.clearRect(0, 0, overlay.width, overlay.height);
   }
 
+  // The bot that plays a color without human players.
+  function botName(team) {
+    const kind = gameState.bots && gameState.bots[team];
+    return kind ? `🤖 ${escapeHtml(botLabels[kind] || kind)}` : '-';
+  }
+
   // Update the leaderboard: show total troops per team and list players.
   function updateLeaderboard() {
     if (!gameState) return;  // Don't update if we don't have game state
@@ -740,7 +765,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
             return `
               <tr class="${team}-row${isCurrentTeam ? ' current-player-team' : ''}">
                 <td class="team-name">${TEAM_STYLES[team].label}</td>
-                <td class="player-names">${stats.players.length > 0 ? stats.players.join(', ') : '-'}</td>
+                <td class="player-names">${stats.players.length > 0 ? stats.players.join(', ') : botName(team)}</td>
                 <td class="stat-value">${stats.troops}</td>
                 <td class="stat-value">${stats.spawns}</td>
                 <td class="stat-value">${stats.cells}</td>
