@@ -1,6 +1,7 @@
 import random
 import threading
 import math
+import time
 import uuid
 import eventlet
 eventlet.monkey_patch()
@@ -37,8 +38,11 @@ class Bot:
     one move per second, and a move sends all troops of the cell, as a player's click does."""
     label = None
 
-    def move(self, game, team):
-        """Return the move to start this second as (from cell id, to cell id), or None."""
+    def move(self, game, team, flights):
+        """Return the move to start this second as (from cell id, to cell id), or None.
+        flights are the moves on the way, which players see on the board: dicts with from, to,
+        team, troops, aimed_at (the owner of the target cell at the start), and arrives (a
+        time.monotonic() time)."""
         return None
 
     def attacked(self, game, team, attacker):
@@ -47,6 +51,11 @@ class Bot:
 class DummyBot(Bot):
     """Does nothing: its color keeps its base and the troops there."""
     label = "Dummy"
+
+def free_cells(game, flights):
+    """Neutral spawns that no troops are on the way to."""
+    aimed = {f["to"] for f in flights}
+    return [c for c in game["board"] if c["owner"] is None and c["isSpawn"] and c["id"] not in aimed]
 
 def own_base(game, team):
     """The team's own base while the team holds it, else None (and the team has no cells)."""
@@ -64,20 +73,28 @@ class PeaceBot(Bot):
         self.second = 0  # move() is called once per second of play
         self.arrivals = {}  # Free cell id -> second when our troops reach it
 
-    def move(self, game, team):
+    def move(self, game, team, flights):
         self.second += 1
-        board = game["board"]
+        return self.peace_move(game, team, flights)
+
+    def peace_move(self, game, team, flights):
+        """Peace's move for this second (see the class description); the second is counted already."""
         base = own_base(game, team)
         if base is None:
             return None
-
-        others = [c for c in board if c["owner"] == team and c is not base and c["troops"] > 0]
+        others = [c for c in game["board"] if c["owner"] == team and c is not base and c["troops"] > 0]
         crowded = [c for c in others if c["troops"] > self.SEND_HOME_ABOVE]
         if crowded:
             return (max(crowded, key=lambda c: c["troops"])["id"], base["id"])
+        return self.take_free_cell(game, base, others, flights)
 
+    def take_free_cell(self, game, base, others, flights):
+        """The move of our cell nearest to a free cell to that cell, or None. The base only moves
+        while no other cell has troops. A free cell that other troops are on the way to is not
+        free: two colors sending the same troops to one cell would tie on it again and again.
+        Call once per second, after counting the second."""
         self.arrivals = {cell_id: second for cell_id, second in self.arrivals.items() if second >= self.second}
-        free = [c for c in board if c["owner"] is None and c["isSpawn"] and c["id"] not in self.arrivals]
+        free = [c for c in free_cells(game, flights) if c["id"] not in self.arrivals]
         sources = others or ([base] if base["troops"] > 0 else [])
         if not sources or not free:
             return None
@@ -99,20 +116,292 @@ class KushchushchaBot(PeaceBot):
         if attacker not in self.enemies:
             self.enemies.append(attacker)
 
-    def move(self, game, team):
+    def move(self, game, team, flights):
         while self.enemies and own_base(game, self.enemies[0]) is None:
             self.enemies.pop(0)  # That color has lost its base.
         if not self.enemies:
-            return super().move(game, team)
+            return super().move(game, team, flights)
         self.second += 1  # Keep Peace's clock for its free cell bookkeeping.
         own = [c for c in game["board"] if c["owner"] == team and c["troops"] > 0]
         if not own:
             return None
         return (max(own, key=lambda c: c["troops"])["id"], own_base(game, self.enemies[0])["id"])
 
+class WarriorBot(PeaceBot):
+    """Plays like Peace while there are free cells, then makes war on the color with the fewest
+    troops until that color has neither cells nor troops on the way, then on the next one.
+
+    A threat is a color that can attack: one a person plays, or one whose bot has attacked
+    anybody. Losing the base loses all cells, so the base must hold out against RESERVE_SHARE of
+    the army of every threat, counting the base's growth while the troops are on the way and the
+    cells that can reinforce it in time: a color that sends everything leaves its own base empty,
+    so it rarely does, and the defense below answers real attacks. Before a strike on an enemy
+    base, though, that enemy has nothing to lose: it sees the strike coming and can send its
+    whole army at our base before its base falls, so then the base must hold out against
+    ALL_IN_SHARE of that army.
+
+    Each second, the first of these that applies:
+    1. Defend the base: if the troops on the way to it would take it, a cell that arrives in
+       time sends its troops there.
+    2. Defend another cell, if one cell that arrives in time is enough; else give the cell up.
+    3. Peace's move, while there are free cells.
+    4. Punish: a color whose troops are on the way to our base has sent them from its cells, so
+       if one of our cells can take its base now, it does.
+    5. Take back a cell lost in the last RETAKE_SECONDS, if one cell can do it.
+    6. Keep the reserve: if the base would not hold out, the fullest cell sends its troops home.
+    7. A decisive blow from the base on the enemy base, if the base would hold out empty.
+    8. A strike from the staging cell (our cell nearest to the target) once it has enough troops
+       (the target's troops when ours arrive, its color's troops on the way there, and a
+       margin) and the base would hold out without them; else the staging cell's troops go
+       home. The target is the enemy base if we can gather enough for it and the base would
+       hold out, else the cheapest enemy cell; a cell that held out against two strikes is left
+       alone for a while.
+    9. Take a free cell that turned up (after a tie).
+    10. The fullest other cell feeds the staging cell until it has enough, then the base."""
+    label = "Warrior"
+    MARGIN_SHARE = 0.1  # Troops over the expected defense: 10%, at least MIN_MARGIN.
+    MIN_MARGIN = 3
+    RESERVE_SHARE = 0.5  # The base holds out against half of a threat's army ...
+    ALL_IN_SHARE = 1.2  # ... and against all of it plus 20% before we strike its base.
+    MIN_FEED = 5  # Smaller groups do not feed: less clutter on the board.
+    RETAKE_SECONDS = 30
+    GIVE_UP_STRIKES = 2  # Failed strikes on a cell before it is left alone ...
+    GIVE_UP_SECONDS = 30  # ... for this long.
+    SAFETY_SECONDS = 0.3  # A reinforcement must arrive this much before the attack.
+
+    def __init__(self):
+        super().__init__()
+        self.at_war = False
+        self.enemy = None
+        self.target = None  # Id of the enemy cell we gather troops for
+        self.aggressors = set()  # Colors seen attacking anybody
+        self.owned = set()  # Our cell ids a second ago
+        self.lost = {}  # Cell id -> second when we lost it
+        self.strikes = {}  # Target cell id -> second when our strike should have landed
+        self.failures = {}  # Target cell id -> (failed strikes, second until it is left alone)
+
+    def move(self, game, team, flights):
+        self.second += 1
+        board = game["board"]
+        base = own_base(game, team)
+        if base is None:
+            return None
+        fronts = [c for c in board if c["owner"] == team and c is not base]
+        self.note_results(board, team, flights)
+        threats = {color: self.RESERVE_SHARE for color in (self.aggressors | human_teams(game)) - {team, None}}
+
+        move = self.defend(base, fronts, flights, team) or self.defend_cells(fronts, flights, team)
+        if move:
+            return move
+        if not self.at_war:
+            if free_cells(game, flights):
+                return self.peace_move(game, team, flights)
+            self.at_war = True
+
+        enemy = self.choose_enemy(board, team, flights)
+        if enemy is None:
+            return None
+        move = self.punish(game, team, base, fronts, flights) or self.retake(board, team, fronts, flights)
+        if move:
+            return move
+        feeders = [c for c in fronts if c["troops"] >= self.MIN_FEED]
+        go_home = (max(feeders, key=lambda c: c["troops"])["id"], base["id"]) if feeders else None
+        if not self.holds_out(board, team, base, base["troops"], fronts, flights, threats):
+            return go_home
+
+        enemy_base = own_base(game, enemy)
+        if (enemy_base and base["troops"] >= self.needed(enemy_base, base, flights)
+                and self.holds_out(board, team, base, 0, fronts, flights, {**threats, enemy: self.ALL_IN_SHARE})):
+            self.strikes[enemy_base["id"]] = self.second + math.ceil(cell_distance(base, enemy_base)) + 1
+            return (base["id"], enemy_base["id"])
+
+        target = self.choose_target(board, team, base, enemy, enemy_base, fronts, flights, threats)
+        if target is None:
+            return None  # The enemy has only troops on the way: wait, defense handles them.
+        staging = min(fronts, key=lambda c: cell_distance(c, target))
+        striking = any(f["team"] == team and f["to"] == target["id"] for f in flights)
+        ready = staging["troops"] >= self.needed(target, staging, flights)
+        if ready and not striking:
+            rest = [c for c in fronts if c is not staging]
+            risky = {**threats, enemy: self.ALL_IN_SHARE} if target is enemy_base else threats
+            if self.holds_out(board, team, base, base["troops"], rest, flights, risky):
+                self.strikes[target["id"]] = self.second + math.ceil(cell_distance(staging, target)) + 1
+                return (staging["id"], target["id"])
+            return (staging["id"], base["id"])  # The base needs these troops first.
+
+        others = [c for c in fronts if c["troops"] > 0]
+        free_move = self.take_free_cell(game, base, others, flights) if others else None
+        if free_move:
+            return free_move
+        # The staging cell gathers what the strike needs; the rest goes home.
+        feeders = [c for c in feeders if c is not staging]
+        if feeders:
+            return (max(feeders, key=lambda c: c["troops"])["id"], base["id"] if ready else staging["id"])
+        return None
+
+    def note_results(self, board, team, flights):
+        """Remember the attackers, the cells we lost, and the strikes that did not take their target."""
+        for flight in flights:
+            if flight["aimed_at"] not in (None, flight["team"]):
+                self.aggressors.add(flight["team"])
+        owned = {c["id"] for c in board if c["owner"] == team}
+        for cell_id in self.owned - owned:
+            self.lost[cell_id] = self.second
+        self.owned = owned
+        for cell_id, landed in list(self.strikes.items()):
+            if self.second >= landed:
+                del self.strikes[cell_id]
+                if board[cell_id]["owner"] != team:
+                    count = self.failures.get(cell_id, (0, 0))[0] + 1
+                    self.failures[cell_id] = (count, self.second + self.GIVE_UP_SECONDS if count >= self.GIVE_UP_STRIKES else 0)
+
+    def defend(self, cell, fronts, flights, team, one_move_only=False):
+        """A reinforcement for the cell if the enemy troops on the way to it would take it, else None.
+        With one_move_only, only a cell that is enough by itself helps (else the cell is given up)."""
+        now = time.monotonic()
+        incoming = sorted((f for f in flights if f["to"] == cell["id"] and f["team"] != team), key=lambda f: f["arrives"])
+        ours = [f for f in flights if f["to"] == cell["id"] and f["team"] == team]
+        attack = 0
+        for flight in incoming:
+            attack += flight["troops"]
+            wait = flight["arrives"] - now
+            defense = cell["troops"] + math.floor(wait) + sum(f["troops"] for f in ours if f["arrives"] <= flight["arrives"])
+            shortfall = attack - defense  # The cell is lost at 0 too: a tie leaves it neutral.
+            if shortfall < 0:
+                continue
+            need = shortfall + max(self.MIN_MARGIN, math.ceil(shortfall * self.MARGIN_SHARE))
+            # The fullest cell that arrives in time: a big reinforcement covers the next waves
+            # too, so the next seconds are free for other moves (such as punishing the attacker).
+            helpers = [c for c in fronts if c is not cell and c["troops"] > 0
+                       and cell_distance(c, cell) < wait - self.SAFETY_SECONDS]
+            if not helpers:
+                return None  # Too late for this attack.
+            helper = max(helpers, key=lambda c: c["troops"])
+            if helper["troops"] >= need or not one_move_only:
+                return (helper["id"], cell["id"])
+            return None  # Too expensive: give the cell up.
+        return None
+
+    def defend_cells(self, fronts, flights, team):
+        for cell in fronts:
+            move = self.defend(cell, fronts, flights, team, one_move_only=True)
+            if move:
+                return move
+        return None
+
+    def holds_out(self, board, team, base, troops, fronts, flights, threats):
+        """Whether the base, with that many troops and these cells to reinforce it, holds out
+        against each threat color's army times its share (threats: color -> share; see the
+        class description)."""
+        if troops < base["troops"] and any(f["to"] == base["id"] and f["team"] != team for f in flights):
+            return False  # Do not empty the base while enemy troops are on the way to it.
+        for color, share in threats.items():
+            cells = [c for c in board if c["owner"] == color]
+            army = sum(c["troops"] for c in cells) + sum(f["troops"] for f in flights if f["team"] == color)
+            if army == 0:
+                continue
+            # The bulk of an army is usually on its fullest cell; its way to our base is the time
+            # our base has to grow and to be reinforced.
+            distance = cell_distance(max(cells, key=lambda c: c["troops"]), base) if cells else 0
+            helpers = sorted((c["troops"] for c in fronts if cell_distance(c, base) < distance - 1), reverse=True)
+            reinforcement = sum(helpers[:max(0, math.floor(distance) - 1)])
+            if troops + math.floor(distance) + reinforcement < army * share:
+                return False
+        return True
+
+    def punish(self, game, team, base, fronts, flights):
+        """A strike on the base of a color whose troops are on the way to our base, if one cell can take it."""
+        for color in {f["team"] for f in flights if f["to"] == base["id"] and f["team"] != team}:
+            enemy_base = own_base(game, color)
+            if enemy_base is None or any(f["team"] == team and f["to"] == enemy_base["id"] for f in flights):
+                continue
+            able = [c for c in fronts if c["troops"] >= self.needed(enemy_base, c, flights)]
+            if able:
+                source = min(able, key=lambda c: cell_distance(c, enemy_base))
+                self.strikes[enemy_base["id"]] = self.second + math.ceil(cell_distance(source, enemy_base)) + 1
+                return (source["id"], enemy_base["id"])
+        return None
+
+    def retake(self, board, team, fronts, flights):
+        """A strike on a cell we lost in the last RETAKE_SECONDS, if one cell can take it back."""
+        best = None
+        for cell_id, lost_at in list(self.lost.items()):
+            cell = board[cell_id]
+            if self.second - lost_at > self.RETAKE_SECONDS or cell["owner"] in (None, team):
+                del self.lost[cell_id]
+                continue
+            if any(f["team"] == team and f["to"] == cell_id for f in flights):
+                continue
+            for source in fronts:
+                if source["troops"] >= self.needed(cell, source, flights):
+                    distance = cell_distance(source, cell)
+                    if best is None or distance < best[0]:
+                        best = (distance, source, cell)
+        if best is None:
+            return None
+        distance, source, cell = best
+        self.strikes[cell["id"]] = self.second + math.ceil(distance) + 1
+        return (source["id"], cell["id"])
+
+    def choose_enemy(self, board, team, flights):
+        """The color we make war on: the one with the fewest troops, kept until it has neither
+        cells nor troops on the way."""
+        if self.enemy is not None and (any(c["owner"] == self.enemy for c in board)
+                                       or any(f["team"] == self.enemy for f in flights)):
+            return self.enemy
+        totals = {}
+        for cell in board:
+            if cell["owner"] not in (None, team):
+                totals[cell["owner"]] = totals.get(cell["owner"], 0) + cell["troops"]
+        for flight in flights:
+            if flight["team"] in totals:
+                totals[flight["team"]] += flight["troops"]
+        self.enemy = min(totals, key=totals.get) if totals else None
+        self.target = None
+        return self.enemy
+
+    def choose_target(self, board, team, base, enemy, enemy_base, fronts, flights, threats):
+        """The enemy cell to gather troops for (see the class description), or None."""
+        def left_alone(cell):
+            count, until = self.failures.get(cell["id"], (0, 0))
+            return count >= self.GIVE_UP_STRIKES and self.second < until
+
+        candidates = [c for c in board if c["owner"] == enemy]
+        if not candidates:
+            return None
+        allowed = [c for c in candidates if not left_alone(c)] or candidates
+        gatherable = sum(c["troops"] for c in fronts)
+
+        def cost(cell):
+            return self.needed(cell, min(fronts, key=lambda c: cell_distance(c, cell)), flights)
+
+        current = board[self.target] if self.target is not None else None
+        base_possible = False
+        if enemy_base is not None and any(c is enemy_base for c in allowed) and cost(enemy_base) <= gatherable:
+            staging = min(fronts, key=lambda c: cell_distance(c, enemy_base))
+            rest = [c for c in fronts if c is not staging]
+            base_possible = self.holds_out(board, team, base, base["troops"], rest, flights, {**threats, enemy: self.ALL_IN_SHARE})
+        if base_possible:
+            current = enemy_base
+        elif current is None or not any(c is current for c in allowed) or cost(current) > gatherable:
+            others = [c for c in allowed if c is not enemy_base]
+            current = min(others or allowed, key=cost)
+        self.target = current["id"]
+        return current
+
+    def needed(self, target, source, flights):
+        """Troops that the source cell must send to take the target cell."""
+        travel = cell_distance(source, target)
+        defense = target["troops"] + math.ceil(travel)  # An owned cell gains 1 troop per second.
+        now = time.monotonic()
+        for flight in flights:
+            if flight["to"] == target["id"] and flight["team"] == target["owner"] and flight["arrives"] - now <= travel:
+                defense += flight["troops"]
+        return defense + max(self.MIN_MARGIN, math.ceil(defense * self.MARGIN_SHARE))
+
 # Bot classes by kind. A color without human players is played by the bot chosen for it in the
 # lobby; each game creates its own bot objects, so bots can keep state between seconds.
-BOTS = {"dummy": DummyBot, "peace": PeaceBot, "kushchushcha": KushchushchaBot}
+BOTS = {"dummy": DummyBot, "peace": PeaceBot, "kushchushcha": KushchushchaBot, "warrior": WarriorBot}
 DEFAULT_BOT = "dummy"
 BOT_OPTIONS = [{"kind": kind, "label": bot.label} for kind, bot in BOTS.items()]
 
@@ -550,6 +839,9 @@ def launch_move(game_key, game, move):
 
     # Emit a start_move event with move data, duration, and the source cell with fewer troops.
     socketio.emit('start_move', {"move": move, "duration": duration, "cells": [from_cell]}, room=game_key)
+    flights = game_runtime(game_key, game)["flights"]  # Bots see the moves on the way, as players do.
+    flights[move_id] = {"from": from_id, "to": to_id, "team": attacking_team, "troops": attacking_troops,
+                        "aimed_at": target_owner, "arrives": time.monotonic() + distance}
     print(f"Emitted start_move for game {game_key} with move_id {move_id} and duration {duration} ms.")
 
     def process_move():
@@ -563,6 +855,7 @@ def launch_move(game_key, game, move):
             return process_move()  # Recursively check until unpaused
             
         # Process the move.
+        flights.pop(move_id, None)
         changed = [to_cell]  # Cells to send with end_move; the whole board goes out every second.
         defending_team = to_cell["owner"]
         if to_cell["owner"] is None:
@@ -618,13 +911,18 @@ def generate_troops():
                 print(f"Updated troops for game {game_key}")
         socketio.sleep(1)
 
-bot_players = {}  # Game key -> (game, {team: bot object}); the game check drops bots of an old game.
+runtime = {}  # Game key -> server-only state of the game: bot objects and moves on the way.
+
+def game_runtime(game_key, game):
+    """Server-only state of the game, which clients do not get; a new game with the same key starts afresh."""
+    state = runtime.get(game_key)
+    if state is None or state["game"] is not game:
+        state = runtime[game_key] = {"game": game, "bots": {}, "flights": {}}
+    return state
 
 def bot_for(game_key, game, team):
     """The bot object that plays the team in this game; made on first use."""
-    if game_key not in bot_players or bot_players[game_key][0] is not game:
-        bot_players[game_key] = (game, {})
-    bots = bot_players[game_key][1]
+    bots = game_runtime(game_key, game)["bots"]
     if team not in bots:
         bots[team] = BOTS[game["bots"][team]]()
     return bots[team]
@@ -635,9 +933,10 @@ def human_teams(game):
 def run_bots(game_key, game):
     """Let the bot of every color without human players start its move for this second."""
     humans = human_teams(game)
+    flights = list(game_runtime(game_key, game)["flights"].values())
     for team in game["teams"]:
         if team not in humans:
-            move = bot_for(game_key, game, team).move(game, team)
+            move = bot_for(game_key, game, team).move(game, team, flights)
             if move:
                 launch_move(game_key, game, {"game_key": game_key, "from": move[0], "to": move[1], "team": team})
 
@@ -650,7 +949,7 @@ def handle_finish_game(data):
 
     # Delete the game state
     del games[game_key]
-    bot_players.pop(game_key, None)
+    runtime.pop(game_key, None)
     print(f"Game {game_key} finished and cleaned up")
     
     # Notify all clients in the room that the game is finished
