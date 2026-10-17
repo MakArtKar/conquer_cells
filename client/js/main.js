@@ -13,6 +13,8 @@ const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 6;
 const MAX_NAME_LENGTH = 20;
 const NAME_STORAGE_KEY = 'conquer-cells-name';
+const TOKEN_STORAGE_KEY = 'conquer-cells-token';  // Secret player key: the server knows us again after a reload
+const STALE_MS = 6000;  // No game update for this long during play means a dead connection: reconnect.
 
 // Display settings per team. An N-player game uses the first N teams of the server's list.
 const TEAM_STYLES = {
@@ -257,25 +259,72 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   let view = 'lobby';  // 'lobby' until the player enters the running game, then 'game'
   let lobbyState = null;  // Last game state from the server's lobby_state
-  let myTeam = null;  // Sent again when the socket reconnects
+  let myId = null;  // Our player id in this game, from the server's welcome
+  let myTeam = null;
+  let lastUpdate = performance.now();  // When the last game update came, during play
+  let resync = false;  // After our own (re)connect, the next lobby_state replaces the whole game state
   let myName = localStorage.getItem(NAME_STORAGE_KEY) || `Player ${Math.floor(100 + Math.random() * 900)}`;
   localStorage.setItem(NAME_STORAGE_KEY, myName);
+  let token = localStorage.getItem(TOKEN_STORAGE_KEY);
+  if (!token) {
+    token = window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`.replace('.', '');
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  }
 
   renderLobbyPage(appDiv, gameKey);
   setupLobbyControls();
+  const banner = document.createElement('div');
+  banner.className = 'connection-banner';
+  banner.textContent = 'Connection lost, reconnecting...';
+  banner.hidden = true;
+  document.body.appendChild(banner);
 
-  // Join on every connect: after a reconnect the server knows the socket under a new id.
+  // Join on every connect: after a reload or a lost connection, the token brings our player back.
   socket.on('connect', () => {
-    socket.emit('join_lobby', { game_key: gameKey, player_name: myName, team: myTeam, players: requestedPlayers });
+    banner.hidden = true;
+    lastUpdate = performance.now();
+    resync = true;
+    socket.emit('join_lobby', { game_key: gameKey, player_name: myName, token: token, players: requestedPlayers });
+  });
+  socket.on('disconnect', () => {
+    banner.hidden = false;
+  });
+  window.addEventListener('online', () => {
+    if (!socket.connected) socket.connect();
+  });
+  // A connection can die without closing (the network blinked): during play a game update comes
+  // every second, so a long silence means we connect again.
+  setInterval(() => {
+    if (view === 'game' && socket.connected && performance.now() - lastUpdate > STALE_MS) {
+      console.log('No game updates: reconnecting');
+      banner.hidden = false;
+      socket.disconnect();
+      socket.connect();
+    }
+  }, 1000);
+
+  socket.on('welcome', (data) => {
+    myId = data.playerId;
   });
 
   socket.on('lobby_state', (state) => {
     lobbyState = state;
     botLabels = Object.fromEntries(state.botOptions.map(option => [option.kind, option.label]));
-    if (view !== 'lobby') return;
-    const me = state.players[socket.id];
+    const me = state.players[myId];
     myTeam = me ? me.team : null;
-    // Players with a color enter the game when it starts, or when they choose a color in a running game.
+    if (view === 'game') {
+      // Others joining or leaving send lobby_state too: only our own reconnect needs the whole state.
+      if (state.status !== 'playing') {
+        leaveGame(state);  // The game is gone (the server restarted): a new one waits in the lobby.
+      } else if (resync) {
+        refreshGame(state);
+      }
+      resync = false;
+      return;
+    }
+    resync = false;
+    // Players with a color enter the game when it starts, when they choose a color in a running
+    // game, or when they come back to it (after a reload).
     if (state.status === 'playing' && myTeam) {
       enterGame(state);
     } else {
@@ -332,6 +381,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   socket.on('game_state', (state) => {
     if (view !== 'game' || !state || !state.board) return;
+    lastUpdate = performance.now();
     gameState = state;
     boardState = state.board;
     updateBoard(boardState);
@@ -388,8 +438,11 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   function renderLobby(state) {
     const playing = state.status === 'playing';
-    const players = Object.entries(state.players).map(([sid, player]) => ({ ...player, isMe: sid === socket.id }));
-    const nameHtml = (player) => player.isMe ? `<b>${escapeHtml(player.name)} (you)</b>` : escapeHtml(player.name);
+    const players = Object.entries(state.players).map(([id, player]) => ({ ...player, isMe: id === myId }));
+    const nameHtml = (player) => {
+      const name = escapeHtml(player.name) + (player.online === false ? ' (offline)' : '');
+      return player.isMe ? `<b>${name} (you)</b>` : name;
+    };
 
     document.getElementById('lobby-status').textContent = playing
       ? 'The game is on: choose a color to join it, or watch.'
@@ -443,6 +496,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
 
   function enterGame(state) {
     view = 'game';
+    lastUpdate = performance.now();
     currentPlayer = { name: myName, team: myTeam };
     renderGamePage(appDiv);
     setupGameControls();
@@ -454,6 +508,40 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     renderBoard(state);
     // Start periodic leaderboard updates and store interval ID
     updateLeaderboardInterval = setInterval(updateLeaderboard, 1000);
+  }
+
+  // The whole game state after our reconnect; the moves that ended meanwhile (and never got
+  // end_move) leave the screen by time, see drawActiveMoveVectors.
+  function refreshGame(state) {
+    lastUpdate = performance.now();
+    currentPlayer.team = myTeam;
+    if (!!state.isPaused !== isPaused) {
+      applyPauseState(!!state.isPaused);
+    }
+    gameState = state;
+    boardState = state.board;
+    if (boardCells.length !== state.board.length) {
+      renderBoard(state);  // Another game under the same code
+    } else {
+      updateBoard(boardState);
+    }
+  }
+
+  function leaveGame(state) {
+    clearInterval(updateLeaderboardInterval);
+    cancelAnimationFrame(animationFrameId);
+    moveAnimations = [];
+    boardCells = [];
+    boardState = null;
+    selectedCell = null;
+    gameState = null;
+    isPaused = false;
+    pauseStartTime = null;
+    totalPauseDuration = 0;
+    view = 'lobby';
+    renderLobbyPage(appDiv, gameKey);
+    setupLobbyControls();
+    renderLobby(state);
   }
 
   // Show the pause state on the pause button and track the paused time for the move animations.
@@ -658,15 +746,18 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     ctx.clearRect(0, 0, overlay.width, overlay.height);
 
     const currentTime = performance.now();
+    // Calculate progress considering total pause duration and current pause if any
+    let effectivePauseDuration = totalPauseDuration;
+    if (isPaused && pauseStartTime) {
+      effectivePauseDuration += currentTime - pauseStartTime;
+    }
+    const adjustedCurrentTime = currentTime - effectivePauseDuration;
+
+    // end_move removes a move when it lands; a move whose end_move was lost (while the connection
+    // was down) goes a second after it should have landed.
+    moveAnimations = moveAnimations.filter(anim => adjustedCurrentTime - anim.startTime < anim.duration + 1000);
 
     moveAnimations.forEach(anim => {
-      // Calculate progress considering total pause duration and current pause if any
-      let effectivePauseDuration = totalPauseDuration;
-      if (isPaused && pauseStartTime) {
-        effectivePauseDuration += currentTime - pauseStartTime;
-      }
-
-      const adjustedCurrentTime = currentTime - effectivePauseDuration;
       const progress = (adjustedCurrentTime - anim.startTime) / anim.duration;
 
       if (progress <= 1) {
@@ -749,7 +840,7 @@ function initializeGame(appDiv, gameKey, requestedPlayers) {
     if (gameState.players) {
       Object.values(gameState.players).forEach(player => {
         if (teamTotals[player.team]) {
-          teamTotals[player.team].players.push(escapeHtml(player.name));
+          teamTotals[player.team].players.push(escapeHtml(player.name) + (player.online === false ? ' (offline)' : ''));
         }
       });
     }

@@ -569,3 +569,22 @@ tr.cyan-row.current-player-team {
   50% { stroke: rgba(255, 201, 53, 0.5); }
   100% { stroke: rgba(255, 201, 53, 1); }
 }
+
+/* Shown while the connection to the server is lost */
+.connection-banner {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  padding: 10px 20px;
+  border-radius: 6px;
+  background: #f44336;
+  color: #fff;
+  font-weight: bold;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+}
+
+.connection-banner[hidden] {
+  display: none;
+}

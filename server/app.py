@@ -11,7 +11,8 @@ from flask_socketio import SocketIO, join_room
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+# Pings every 10 s, 10 s to answer: a dead connection is found within 20 s (25 + 20 by default).
+socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*", ping_interval=10, ping_timeout=10)
 
 # In-memory dictionary to store game states by game key.
 games = {}
@@ -685,26 +686,53 @@ def broadcast_lobby(game_key):
     """Send the whole game, with the board shapes, to everybody in it; clients in the lobby show it."""
     socketio.emit('lobby_state', dict(games[game_key], botOptions=BOT_OPTIONS), room=game_key)
 
+# A player is known by a secret token that the browser keeps, so that after a reload or a lost
+# connection the same player (with the same color) comes back. game["players"] maps public player
+# ids to {name, team, online, awaySince}; the tokens stay on the server.
+OFFLINE_GRACE_SECONDS = 60  # A player who went away keeps the color this long before a bot plays it.
+connections = {}  # Socket id -> (game key, player id)
+
 def lobby_sender(data):
     """Return (game key, game, player) for the sender of an event, or (None, None, None)."""
-    game_key = data.get('game_key')
+    game_key, player_id = connections.get(request.sid, (None, None))
     game = games.get(game_key)
-    player = game["players"].get(request.sid) if game else None
+    player = game["players"].get(player_id) if game else None
     return (game_key, game, player) if player else (None, None, None)
+
+def leave(sid):
+    """Forget the socket; its player is offline if it has no other socket in the game."""
+    game_key, player_id = connections.pop(sid, (None, None))
+    game = games.get(game_key)
+    player = game["players"].get(player_id) if game else None
+    if player and not any(c == (game_key, player_id) for c in connections.values()):
+        player["online"] = False
+        player["awaySince"] = time.time()
+        broadcast_lobby(game_key)
 
 @socketio.on('join_lobby')
 def handle_join_lobby(data):
-    """Add the sender to the game's lobby; a new game uses the requested player count."""
+    """Add the sender to the game's lobby, or bring its player back; a new game uses the requested
+    player count. The sender learns its player id from the welcome event."""
     game_key = data.get('game_key')
     if not isinstance(game_key, str) or not game_key:
         return
+    token = data.get('token')
+    if not isinstance(token, str) or not 8 <= len(token) <= 64:
+        token = request.sid  # An old client: the player lasts as long as the connection.
+    leave(request.sid)
     game = get_or_create_game(game_key, data.get('players', DEFAULT_PLAYERS))
-    # A client that reconnects sends its color again.
-    team = data.get('team') if data.get('team') in game["teams"] else None
-    game["players"][request.sid] = {"name": clean_name(data.get('player_name')), "team": team}
+    tokens = game_runtime(game_key, game)["tokens"]
+    player_id = tokens.get(token)
+    if player_id not in game["players"]:
+        player_id = tokens[token] = uuid.uuid4().hex[:8]
+        game["players"][player_id] = {"name": "", "team": None}
+    player = game["players"][player_id]
+    player.update(name=clean_name(data.get('player_name')), online=True, awaySince=None)
+    connections[request.sid] = (game_key, player_id)
     join_room(game_key)
+    socketio.emit('welcome', {"playerId": player_id}, to=request.sid)
     broadcast_lobby(game_key)
-    print(f"Player {game['players'][request.sid]['name']} joined game {game_key} (sid: {request.sid})")
+    print(f"Player {player['name']} ({player_id}) joined game {game_key} (sid: {request.sid})")
 
 @socketio.on('set_name')
 def handle_set_name(data):
@@ -756,9 +784,7 @@ def handle_start_game(data):
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    for game_key, game in list(games.items()):
-        if game["players"].pop(request.sid, None) is not None:
-            broadcast_lobby(game_key)
+    leave(request.sid)
 
 @socketio.on('toggle_pause')
 def handle_toggle_pause(data):
@@ -786,7 +812,8 @@ def handle_move(data):
     move = data
 
     # Retrieve the player's information.
-    player = game["players"].get(request.sid)
+    sender_game_key, player_id = connections.get(request.sid, (None, None))
+    player = game["players"].get(player_id) if sender_game_key == game_key else None
     if not player:
         print("Player not found for sid:", request.sid)
         return
@@ -902,22 +929,35 @@ def generate_troops():
     """Background thread that updates troop counts and sends updates each second."""
     while True:
         for game_key, game in list(games.items()):  # Use list() to avoid RuntimeError from dict changing size during iteration
-            if game["status"] == "playing" and not game.get('isPaused', False):  # Only in a running game
-                for cell in game["board"]:
-                    if cell["isSpawn"] and cell["spawnActive"]:
-                        cell["troops"] += 1
-                run_bots(game_key, game)
+            if game["status"] == "playing":
+                if not game.get('isPaused', False):
+                    for cell in game["board"]:
+                        if cell["isSpawn"] and cell["spawnActive"]:
+                            cell["troops"] += 1
+                    run_bots(game_key, game)
+                # Also while paused: clients take a second without updates for a lost connection.
                 socketio.emit('game_state', without_layout(game), room=game_key)
-                print(f"Updated troops for game {game_key}")
+            else:
+                drop_away_players(game_key, game)
         socketio.sleep(1)
 
-runtime = {}  # Game key -> server-only state of the game: bot objects and moves on the way.
+def drop_away_players(game_key, game):
+    """In the lobby, players away longer than OFFLINE_GRACE_SECONDS leave the player list."""
+    now = time.time()
+    away = [player_id for player_id, player in game["players"].items()
+            if not player.get("online", True) and now - player["awaySince"] > OFFLINE_GRACE_SECONDS]
+    for player_id in away:
+        del game["players"][player_id]
+    if away:
+        broadcast_lobby(game_key)
+
+runtime = {}  # Game key -> server-only state of the game: bot objects, moves on the way, player tokens.
 
 def game_runtime(game_key, game):
     """Server-only state of the game, which clients do not get; a new game with the same key starts afresh."""
     state = runtime.get(game_key)
     if state is None or state["game"] is not game:
-        state = runtime[game_key] = {"game": game, "bots": {}, "flights": {}}
+        state = runtime[game_key] = {"game": game, "bots": {}, "flights": {}, "tokens": {}}
     return state
 
 def bot_for(game_key, game, team):
@@ -928,7 +968,10 @@ def bot_for(game_key, game, team):
     return bots[team]
 
 def human_teams(game):
-    return {player["team"] for player in game["players"].values()}
+    """Colors that people play: players online, or away for less than OFFLINE_GRACE_SECONDS."""
+    now = time.time()
+    return {player["team"] for player in game["players"].values()
+            if player.get("online", True) or now - player["awaySince"] < OFFLINE_GRACE_SECONDS}
 
 def run_bots(game_key, game):
     """Let the bot of every color without human players start its move for this second."""
